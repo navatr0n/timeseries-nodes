@@ -19,6 +19,81 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+// ===========================================================================
+// DOM OVERLAY ARCHITECTURE — READ THIS BEFORE MODIFYING POSITIONING CODE
+// ===========================================================================
+//
+// This file renders an HTML table as a DOM overlay on top of the LiteGraph
+// canvas.  Getting this right required extensive iteration (8+ attempts).
+// The lessons below are hard-won — please read before making changes.
+//
+// ─── THE POSITIONING PATTERN ───────────────────────────────────────────
+//
+// We follow the EXACT pattern from ComfyUI's own useAbsolutePosition.ts:
+//
+//   position: fixed
+//   transform-origin: 0 0
+//   transform: scale(canvasScale)
+//   left/top in screen (viewport) pixels
+//   width/height in canvas-space pixels
+//
+// Coordinate conversion (from useCanvasPositionConversion.ts):
+//
+//   screenX = (canvasX + ds.offset[0]) * ds.scale + canvasRect.left
+//   screenY = (canvasY + ds.offset[1]) * ds.scale + canvasRect.top
+//
+// Where ds = app.canvas.ds (LiteGraph's DragAndScale object).
+//
+// ─── THE CONTAINER RULE (MOST IMPORTANT) ───────────────────────────────
+//
+// The table element MUST be a child of #graph-canvas-container — NOT
+// document.body.  This container has `overflow: clip` in its CSS, which
+// is the ONLY overflow mode that clips position:fixed descendants.
+//
+// Without this, the browser's GPU compositor can paint a "ghost" copy of
+// the element at viewport (0,0) when transform: scale(N) with N > ~1.5.
+// This ghost is a well-known class of Safari compositing artifacts with
+// position:fixed + CSS transforms.
+//
+// ─── THE _visible FLAG ─────────────────────────────────────────────────
+//
+// positionTableDOM() runs on every draw frame and sets display:block.
+// Graph-navigation events (litegraph:set-graph, graphCleared) set
+// display:none.  Without a flag, the per-frame display:block would
+// immediately override display:none, causing the table to appear when
+// the node's graph is not active.
+//
+// Solution: syncTableVisibility sets widget._visible = false; then
+// positionTableDOM checks _visible before setting display:block.
+//
+// ─── LAZY DOM MOUNTING ─────────────────────────────────────────────────
+//
+// Don't appendChild in nodeCreated — the canvas container may not exist
+// yet.  Instead, mount lazily on the first onDrawForeground call, where
+// the canvas is guaranteed to be initialised.
+//
+// ─── WHAT NOT TO DO (FAILED APPROACHES) ────────────────────────────────
+//
+// All of these were tried and produce visual bugs:
+//
+//   document.body.appendChild(el)
+//     -> No clipping ancestor for position:fixed. Ghost at >150% zoom.
+//
+//   CSS zoom: ${scale} instead of transform: scale()
+//     -> zoom affects how left/top are interpreted. Table detaches from node.
+//
+//   transform: matrix(a,0,0,d,tx,ty) (fold translation into matrix)
+//     -> Still produces ghost. Two ghosts on main canvas, one in subgraph.
+//
+//   Clip wrapper div on document.body with overflow:hidden
+//     -> overflow:hidden does NOT clip position:fixed children. Ghost at
+//        ALL zoom levels instead of just >150%.
+//
+//   overflow:hidden on the element itself
+//     -> Only clips the element's own content, not compositor artifacts.
+//
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
 // LiteGraph layout constants (must match what LiteGraph uses internally)
 // ---------------------------------------------------------------------------
@@ -363,18 +438,29 @@ function buildTableWidget(node) {
  * Position and scale the table DOM element over the node on the canvas.
  * Called on every draw frame via onDrawForeground (which passes the 2D ctx).
  *
- * Uses app.canvas.ds (LiteGraph's DragAndScale) for positioning and CSS `zoom`
- * for scaling.  This avoids `transform: scale()` entirely — Safari has a
- * compositing bug where position:fixed + transform:scale at high values (>~1.5)
- * paints a "ghost" of the element at the top of the viewport.
+ * Uses the canonical ComfyUI DOM widget positioning pattern from
+ * useAbsolutePosition.ts in the ComfyUI_frontend repo:
  *
- * CSS `zoom` scales both content AND the layout box (like browser page zoom),
- * so there is no compositor layer overflow and no ghost artifact at any zoom.
+ *   position: fixed
+ *   transform-origin: 0 0
+ *   transform: scale(canvasScale)
+ *   left/top: screen (viewport) pixels
+ *   width/height: canvas-space pixels (transform handles visual scaling)
+ *
+ * Coordinate conversion matches useCanvasPositionConversion.ts:
+ *   screenX = (canvasX + ds.offset[0]) * ds.scale + canvasRect.left
+ *   screenY = (canvasY + ds.offset[1]) * ds.scale + canvasRect.top
+ *
+ * CRITICAL: The table element MUST be a child of #graph-canvas-container
+ * (not document.body).  That container has `overflow: clip` which clips ALL
+ * descendants — including position:fixed elements.  Without this, the
+ * browser compositor can paint a "ghost" of the element at viewport (0,0)
+ * when scale > ~1.5.  See DEVELOPER_NOTES.md for the full explanation.
  *
  * IMPORTANT: This function ONLY sets display:block when _visible is true.
  * The _visible flag is managed by syncTableVisibility (graph-switch events)
  * and onGraphCleared.  Without this guard, positionTableDOM would override
- * display:none on every frame and cause a "ghost table" when the node is in
+ * display:none on every frame and cause a stale table when the node is in
  * a graph that is not currently displayed.
  */
 function positionTableDOM(node, ctx) {
@@ -543,15 +629,22 @@ app.registerExtension({
     node.onDrawForeground = function (ctx) {
       origOnDrawForeground?.(ctx);
 
-      // Lazily append to #graph-canvas-container on first draw.
-      // This container has `overflow: clip` which clips ALL descendants
-      // (including position:fixed), preventing the ghost compositor artifact
-      // that occurs when the element is a child of document.body.
+      // Lazy DOM mount: append to #graph-canvas-container on first draw.
+      //
+      // WHY this container?  It has `overflow: clip` — the only CSS overflow
+      // mode that clips position:fixed descendants.  This prevents the GPU
+      // compositor from painting a "ghost" of our element at viewport (0,0)
+      // when transform: scale(N) with N > ~1.5.  Appending to document.body
+      // would produce this ghost.  See the architecture block at the top of
+      // this file for the full explanation.
+      //
+      // WHY lazy?  At nodeCreated time the canvas container may not exist
+      // yet.  On the first onDrawForeground call it is guaranteed mounted.
       const tw = node.widgets?.find((w) => w.name === "_channel_table");
       if (tw?._tableEl && !tw._tableEl.parentElement) {
         const container = document.getElementById("graph-canvas-container")
                           || ctx.canvas.parentElement
-                          || document.body;  // fallback
+                          || document.body;  // fallback (should never happen)
         container.appendChild(tw._tableEl);
       }
 
