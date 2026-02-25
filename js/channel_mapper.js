@@ -100,12 +100,110 @@ import { api } from "../../scripts/api.js";
 const LG_TITLE_HEIGHT  = 30;  // px – node title bar
 const LG_SLOT_HEIGHT   = 20;  // px – height of each input/output slot row
 const LG_WIDGET_HEIGHT = 22;  // px – height of a standard widget row
-const LG_NODE_PADDING  = 6;   // px – bottom padding inside node body
+const LG_NODE_PADDING  = 50;  // px – bottom padding inside node body (keeps table from touching node edge)
 const TABLE_ROW_PX     = 26;  // px – actual rendered row height (12px font + cell padding + border)
 const TABLE_HEADER_PX  = 22;  // px – approximate height of the table header row
 const TABLE_PAD_PX     = 10;  // px – breathing room above/below table content
 const NODE_MIN_WIDTH       = 400; // px – minimum node width in canvas space
-const OUTPUT_SLOT_MARGIN   = 32;  // px – right-side gap kept clear for output slot hit targets
+const OUTPUT_SLOT_MARGIN   = 100; // px – right-side gap for output slot labels (1/4 of NODE_MIN_WIDTH)
+
+// ---------------------------------------------------------------------------
+// Pinia nodeDefStore access — Info panel sync
+// ---------------------------------------------------------------------------
+//
+// ComfyUI's Info inspector tab (TabInfo.vue) calls nodeDefStore.fromLGraphNode()
+// to render a node's output list.  The store is populated once from /object_info,
+// so ChannelMapper always shows ["channel_0"] regardless of runtime channel names.
+//
+// Fix: call store.addNodeDef({...nodeDef, output_name:[...], ...}) which does
+//   t.value['ChannelMapper'] = new ComfyNodeDefImpl(updatedV1Data)
+// This KEY REASSIGNMENT in the Pinia reactive map invalidates the nodeInfo
+// computed (which tracks t.value['ChannelMapper']), triggering a full re-render.
+//
+// NOTE: Mutating nodeDef.outputs in-place (splice) does NOT work — Vue's computed
+// tracks the KEY READ, not nested property mutations.  Key reassignment is required.
+//
+// Store ID 'nodeDef' was verified from the compiled ComfyUI frontend bundle
+// (F('nodeDef', ...) call pattern in dialogService-*.js).
+//
+// Access path: document.getElementById('vue-app').__vue_app__
+//                .config.globalProperties.$pinia._s.get('nodeDef')
+// NOTE: ComfyUI mounts on #vue-app, NOT #app. Using #app silently returns null
+//       via optional chaining — no exception, but _nodeDefStore stays null.
+//
+// Graceful degradation: if getNodeDefStore() returns null (Pinia internals changed
+// in a future ComfyUI release), syncInfoPanelOutputs() silently no-ops and the
+// Info tab falls back to static "channel_0" — no crash, no broken functionality.
+
+let _nodeDefStore = null;
+
+/** Lazily access the Pinia nodeDefStore (id='nodeDef') via Vue app internals. */
+function getNodeDefStore() {
+  if (_nodeDefStore) return _nodeDefStore;
+  try {
+    // ComfyUI mounts on #vue-app (confirmed: index.html + compiled Q.mount('#vue-app')).
+    // Fallback searches all id'd elements in case the mount point changes in a future release.
+    const el    = document.getElementById('vue-app')
+                ?? [...document.querySelectorAll('[id]')].find((e) => e.__vue_app__);
+    const pinia = el?.__vue_app__?.config?.globalProperties?.$pinia;
+    _nodeDefStore = pinia?._s?.get('nodeDef') ?? null;
+    if (!_nodeDefStore) {
+      console.warn('[ChannelMapper] nodeDefStore (id="nodeDef") not found — Info tab will show static names');
+    }
+  } catch {
+    // Fail silently — Info tab degrades to static "channel_0"
+  }
+  return _nodeDefStore;
+}
+
+/**
+ * Re-register the ChannelMapper NodeDef in the Pinia store with updated output
+ * names so the Info inspector tab shows the current live channel names.
+ *
+ * WHY addNodeDef (not splice):
+ *   Vue's nodeInfo computed tracks the KEY READ t.value['ChannelMapper'].
+ *   Mutating nodeDef.outputs in-place (splice) does NOT invalidate the computed
+ *   because the key reference doesn't change.  store.addNodeDef() does:
+ *     t.value['ChannelMapper'] = new ComfyNodeDefImpl(updatedV1Data)
+ *   This KEY REASSIGNMENT invalidates nodeInfo → full Info tab re-render.
+ *
+ * The NodeDef is shared across all ChannelMapper instances; node.onSelected
+ * re-syncs on each selection so multi-ChannelMapper workflows always show
+ * the selected node's channels.
+ *
+ * @param {LGraphNode} node  - The ChannelMapper node instance.
+ * @param {object[]}   rows  - Current table rows from widget._rows.
+ */
+function syncInfoPanelOutputs(node, rows) {
+  const store = getNodeDefStore();
+  if (!store) return;
+
+  const nodeDef = store.fromLGraphNode(node);
+  if (!nodeDef) return;
+
+  // Build V1-format arrays that ComfyNodeDefImpl's constructor reads from
+  // (it calls transformNodeDefV1ToV2 internally to build the V2 .outputs array).
+  const names    = rows.length > 0
+    ? rows.map((row, i) => row.name || row.source || `channel_${i}`)
+    : ['channel_0'];
+  const types    = names.map(() => 'CHANNEL');
+  const isList   = names.map(() => false);
+  const tooltips = rows.length > 0
+    ? rows.map((row) => row.source_unit ? `[${row.source_unit}]` : '')
+    : [''];
+
+  // Re-register with updated V1 output fields.
+  // addNodeDef() does: t.value['ChannelMapper'] = newSv  ← KEY REASSIGNMENT
+  // This invalidates nodeInfo computed → NodeHelpContent re-renders with live names.
+  // Spreading {...nodeDef} preserves all other V1 fields (name, display_name, input, etc.)
+  store.addNodeDef({
+    ...nodeDef,
+    output:          types,
+    output_name:     names,
+    output_is_list:  isList,
+    output_tooltips: tooltips,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,10 +273,16 @@ function syncOutputSlots(node, rows) {
     node.removeOutput(node.outputs.length - 1);
   }
 
-  // Rename slots to match the user-assigned channel names
+  // Rename slots to match the user-assigned channel names.
+  // Must write BOTH name and localized_name: LiteGraph renders
+  // `label || localized_name || name`, and ComfyUI's addOutputs() sets
+  // localized_name = "channel_0" before nodeCreated fires, so writing
+  // only name leaves localized_name as the stale "channel_0".
   rows.forEach((row, i) => {
     if (node.outputs[i]) {
-      node.outputs[i].name = row.name || row.source || `channel_${i}`;
+      const label = row.name || row.source || `channel_${i}`;
+      node.outputs[i].name = label;
+      node.outputs[i].localized_name = label;
     }
   });
 
@@ -186,6 +290,10 @@ function syncOutputSlots(node, rows) {
   // Never clamp width upward — that prevents the user from shrinking the node.
   const h = computeNodeHeight(rows.length);
   node.setSize([node.size[0], h]);
+
+  // Keep the Info inspector tab in sync with the current live channel names.
+  // This replaces the static "channel_0" from /object_info with the actual rows.
+  syncInfoPanelOutputs(node, rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +315,16 @@ function buildTableWidget(node) {
   // ---- Read current saved mapping (for round-trip) ----
   const mappingWidget = node.widgets?.find((w) => w.name === "channel_mapping");
   let rows = parseMapping(mappingWidget?.value);
+
+  // When the node is freshly added (no saved mapping) seed one placeholder
+  // row so the table isn't empty and the output slot gets a meaningful name.
+  // source: "" is a sentinel — it won't match any real column name, so
+  // setColumns() will drop it and replace it with actual timeseries columns
+  // the moment a TIMESERIES is connected.
+  if (rows.length === 0) {
+    rows = [{ source: "", name: "channel output", polarity: 1,
+               source_unit: "", unit: "", gain: 1.0, offset: 0.0 }];
+  }
 
   // ---- Inject stylesheet once to suppress number-input spinners ----
   // Inline styles cannot target pseudo-elements, so Chrome's ::webkit-inner-spin-button
@@ -355,7 +473,12 @@ function buildTableWidget(node) {
         if (key === "name") {
           const rowIdx = rows.indexOf(rowData);
           if (node.outputs[rowIdx]) {
-            node.outputs[rowIdx].name = el.value || rowData.source || `channel_${rowIdx}`;
+            // Write both name and localized_name — LiteGraph renders
+            // `label || localized_name || name`, so updating only name
+            // leaves the stale localized_name ("channel_0") as the winner.
+            const label = el.value || rowData.source || `channel_${rowIdx}`;
+            node.outputs[rowIdx].name = label;
+            node.outputs[rowIdx].localized_name = label;
             node.setDirtyCanvas(true);
           }
         }
@@ -435,6 +558,34 @@ function buildTableWidget(node) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Measure the canvas-space pixel width needed to display the longest output
+ * slot label (the Name column).  Uses ctx.measureText() so the measurement
+ * matches the exact font LiteGraph renders for slot labels.
+ *
+ * Returns the text width in canvas-space pixels, or 0 if there are no rows.
+ * Callers should add padding for the slot connector dot (~20 px).
+ */
+function measureOutputLabelWidth(ctx, rows) {
+  if (!rows?.length) return 0;
+
+  // Find the longest display name across all rows.
+  const longest = rows.reduce((max, row) => {
+    const label = row.name || row.source || "";
+    return label.length > max.length ? label : max;
+  }, "");
+
+  if (!longest) return 0;
+
+  // Measure using the same font LiteGraph uses for output slot labels.
+  const prevFont = ctx.font;
+  ctx.font = "11px Arial";
+  const width = ctx.measureText(longest).width;
+  ctx.font = prevFont;
+
+  return width;
+}
+
+/**
  * Position and scale the table DOM element over the node on the canvas.
  * Called on every draw frame via onDrawForeground (which passes the 2D ctx).
  *
@@ -485,7 +636,7 @@ function positionTableDOM(node, ctx) {
 
   const canvasEl = ctx.canvas;
   const elRect   = canvasEl.getBoundingClientRect();
-  const margin   = 4;  // small horizontal inset so table doesn't touch node border
+  const margin   = 15; // px – left inset so table doesn't touch node border
 
   // Canvas-to-client coordinate conversion.
   // Matches ComfyUI's useCanvasPositionConversion.ts:
@@ -498,7 +649,16 @@ function positionTableDOM(node, ctx) {
 
   const rowCount          = tableWidget._rows?.length ?? 0;
   const tableHeightCanvas = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX;
-  const tableWidthCanvas  = node.size[0] - margin - OUTPUT_SLOT_MARGIN;
+
+  // Dynamic right margin: at least OUTPUT_SLOT_MARGIN (100px), expanding to
+  // fit the longest Name label.  measureOutputLabelWidth returns the raw
+  // canvas-2D text width; the 1.6 scalar accounts for LiteGraph rendering
+  // at a slightly different effective font size than ctx.measureText, plus
+  // breathing room around the text.  20px is added for the slot connector
+  // dot and the gap between the dot and the label text.
+  const labelPx      = measureOutputLabelWidth(ctx, tableWidget._rows);
+  const outputMargin = Math.max(OUTPUT_SLOT_MARGIN, labelPx * 1.6 + 20);
+  const tableWidthCanvas  = node.size[0] - margin - outputMargin;
 
   // Canonical ComfyUI DOM widget positioning (from useAbsolutePosition.ts):
   //   position: fixed + transform-origin: 0 0 + transform: scale(S)
@@ -538,6 +698,20 @@ app.registerExtension({
       mappingWidget.computeSize  = () => [0, -4]; // negative height removes gap
       mappingWidget.draw         = () => {};       // skip drawing entirely
       mappingWidget.serialize    = true;           // still save the JSON value
+    }
+
+    // ---- Suppress the notes widget on the canvas ----
+    // Notes are edited via the Parameters inspector tab; the canvas stays clean.
+    // IMPORTANT: do NOT set type="hidden" — that flag is what the Parameters tab
+    // checks to decide whether to render the widget as an interactive input.
+    // Instead, suppress canvas rendering only via draw() and computeSize().
+    // The native type (e.g. "customtext") is preserved so the Parameters tab
+    // renders a proper editable textarea.
+    const notesWidget = node.widgets?.find((w) => w.name === "notes");
+    if (notesWidget) {
+      notesWidget.computeSize = () => [0, -4]; // zero canvas height — no space allocated
+      notesWidget.draw        = () => {};       // no-op draw — invisible on canvas
+      notesWidget.serialize   = true;           // round-trips through save/load
     }
 
     // Build the table widget.  DOM attachment is deferred to the first
@@ -591,8 +765,22 @@ app.registerExtension({
     };
     app.canvas.canvas.addEventListener("litegraph:set-graph", syncTableVisibility);
 
-    // Initial sync of output slots + node size.
+    // Initial sync of output slots + node size (also calls syncInfoPanelOutputs).
     syncOutputSlots(node, rows);
+
+    // Expand to a comfortable initial width for freshly-added nodes.
+    // The table has 8 columns; 800 px gives each column ~85 px of space.
+    // Loaded nodes: configure() restores the JSON-saved width after nodeCreated,
+    // so this only affects nodes added fresh from the node browser.
+    node.setSize([800, node.size[1]]);
+
+    // Re-sync the Info panel whenever this node is selected.  Handles multi-
+    // ChannelMapper workflows where the shared NodeDef may have been overwritten
+    // by a different instance since this node was last active.
+    node.onSelected = function () {
+      const tw = this.widgets?.find((w) => w.name === '_channel_table');
+      syncInfoPanelOutputs(this, tw?._rows ?? []);
+    };
 
     // Override computeSize — LiteGraph uses this as the minimum size floor
     // when the user drags to resize. Return NODE_MIN_WIDTH so the user can
@@ -602,6 +790,17 @@ app.registerExtension({
       const rowCount = tableWidget?._rows?.length ?? 0;
       const h = computeNodeHeight(rowCount);
       return [NODE_MIN_WIDTH, h];
+    };
+
+    // Lock vertical height — allow the user to resize width freely, but
+    // snap height back to the table-dictated value on every resize.
+    // LiteGraph calls onResize(this.size) inside setSize(), and since
+    // `size` is the same reference as `this.size`, mutating size[1] here
+    // directly writes back to the node's actual size.
+    node.onResize = function (size) {
+      const tw = this.widgets?.find((w) => w.name === "_channel_table");
+      const rowCount = tw?._rows?.length ?? 0;
+      size[1] = computeNodeHeight(rowCount);
     };
 
     // ---- Watch for TIMESERIES connections ----

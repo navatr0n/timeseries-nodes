@@ -5,10 +5,14 @@ Nodes
 -----
 LoadTimeseries  -- Load a CSV file and output a TIMESERIES dict.
 ChannelMapper   -- Map CSV columns into named, scaled CHANNEL outputs.
+ChannelXYPlot   -- Plot two CHANNEL signals as an XY chart (IMAGE output).
 
 Dependencies:
-  - numpy  (required, already in ComfyUI requirements.txt)
-  - pandas (optional, improves CSV parsing; install with: pip install pandas)
+  - numpy      (required, already in ComfyUI requirements.txt)
+  - torch      (required, already in ComfyUI requirements.txt)
+  - Pillow     (required, already in ComfyUI requirements.txt)
+  - pandas     (optional, improves CSV parsing;  pip install pandas)
+  - matplotlib (optional, required for ChannelXYPlot; pip install matplotlib)
 
 Without pandas, uses Python's built-in csv module which handles standard CSV.
 With pandas, supports auto-detection of mixed types, non-comma separators, etc.
@@ -33,6 +37,24 @@ try:
 except ImportError:
     _PANDAS_AVAILABLE = False
     logging.info("timeseries_nodes: pandas not available, using built-in csv reader")
+
+import io as _io              # BytesIO — in-memory PNG encoding for ChannelXYPlot
+import torch
+from PIL import Image as _PIL_Image
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")    # Non-interactive backend — MUST precede pyplot import.
+                             # ComfyUI has no display server; without Agg, matplotlib
+                             # may attempt to open a GUI window and crash.
+    import matplotlib.pyplot as plt
+    _MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    _MATPLOTLIB_AVAILABLE = False
+    logging.info(
+        "timeseries_nodes: matplotlib not available — "
+        "ChannelXYPlot disabled. Install with: pip install matplotlib"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +301,47 @@ class LoadTimeseries:
 #   result = polarity × gain × raw_value + offset
 # where polarity ∈ {+1, -1}, gain is a raw→engineering multiplier, and
 # offset is applied after gain (in target units).
+#
+# DYNAMIC OUTPUT SLOT — TWO BUGS, TWO FIXES
+# ChannelMapper's output count is determined at runtime by the JSON mapping
+# (anywhere from 1 to N channels).  Two separate issues affected correctness:
+#
+# BUG 1 — VALIDATION (execution.py ~line 841):
+#      received_type = cls.RETURN_TYPES[val[1]]   # val[1] = link slot index
+#   A plain ("CHANNEL",) raises IndexError for any slot_index > 0.
+#   Fix: _UnboundedChannelTypes.__getitem__ always returns "CHANNEL".
+#
+# BUG 2 — EXECUTION OUTPUT STORAGE (execution.py merge_result_data):
+#      output_is_list = [False] * len(results[0])   # default: N Falses
+#      if hasattr(obj, "OUTPUT_IS_LIST"):
+#          output_is_list = obj.OUTPUT_IS_LIST       # overwrites with (False,)
+#      for i, is_list in zip(range(len(results[0])), output_is_list):
+#          ...                                        # zip truncates to shorter!
+#   If OUTPUT_IS_LIST = (False,) (length 1), zip truncates to 1 iteration —
+#   only slot 0 is stored; all other slots silently receive None downstream.
+#   Fix: do NOT define OUTPUT_IS_LIST on ChannelMapper.  The default path
+#   uses [False]*N (where N = actual return-tuple length), so all N outputs
+#   are stored correctly.
+#
+# NOTE on __len__: RETURN_TYPES.__len__ is NOT used by output storage — only
+# __getitem__ matters for validation.  JSON serialisation (json.dumps) uses
+# CPython's C-level tuple iterator (Py_SIZE = 1), not __len__, so the
+# /object_info response still shows ["CHANNEL"] regardless.
+
+class _UnboundedChannelTypes(tuple):
+    """
+    Tuple subclass for ChannelMapper.RETURN_TYPES.
+
+    - __getitem__(N) → "CHANNEL" for any integer N  (validation fix: BUG 1)
+    - JSON serialisation / list() use C-level tuple iteration (Py_SIZE = 1),
+      not __len__, so /object_info still yields ["CHANNEL"] — 1 initial slot.
+    - DO NOT add OUTPUT_IS_LIST to ChannelMapper (see BUG 2 note above).
+    """
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return super().__getitem__(index)
+        return "CHANNEL"
 
 class ChannelMapper:
     """
@@ -298,11 +361,24 @@ class ChannelMapper:
                 # Each element: {source, name, polarity, source_unit, unit, gain, offset}
                 "channel_mapping": ("STRING", {"default": _EMPTY_MAPPING}),
             },
+            "optional": {
+                # Free-form annotation for this node instance.  Hidden on the canvas
+                # by the JS extension; editable via the Parameters inspector tab.
+                "notes": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "tooltip": "Free-form notes for this ChannelMapper node (metadata only).",
+                    },
+                ),
+            },
         }
 
-    # RETURN_TYPES is set to a single placeholder; the JS extension expands
-    # the actual output slots dynamically based on the mapping table.
-    RETURN_TYPES = ("CHANNEL",)
+    # _UnboundedChannelTypes: __getitem__ returns "CHANNEL" for any slot index
+    # (fixes validation IndexError).  See the comment block above for details.
+    # DO NOT add OUTPUT_IS_LIST here — see BUG 2 in the comment block above.
+    RETURN_TYPES = _UnboundedChannelTypes(("CHANNEL",))
     RETURN_NAMES = ("channel_0",)
     FUNCTION = "map_channels"
     CATEGORY = "timeseries"
@@ -310,10 +386,8 @@ class ChannelMapper:
         "Maps TIMESERIES columns into named, scaled CHANNEL outputs. "
         "Connect a TIMESERIES to populate the channel table automatically."
     )
-    SEARCH_ALIASES = ["channel mapper", "split signals", "channel", "rename signals"]
-    OUTPUT_IS_LIST = (False,)
 
-    def map_channels(self, timeseries: TimeseriesDict, channel_mapping: str):
+    def map_channels(self, timeseries: TimeseriesDict, channel_mapping: str, notes: str = ""):
         ts_data: dict = timeseries["data"]
         ts_sr: float | None = timeseries["sample_rate"]
 
@@ -373,17 +447,109 @@ class ChannelMapper:
 
 
 # ---------------------------------------------------------------------------
+# Node: ChannelXYPlot
+# ---------------------------------------------------------------------------
+# Renders two CHANNEL signals as an XY line chart via matplotlib and returns
+# the result as a standard ComfyUI IMAGE tensor (1, H, W, 3) float32 [0, 1].
+# No JS extension is needed — ComfyUI previews IMAGE outputs natively.
+#
+# Conversion pipeline:
+#   matplotlib Figure  →  savefig(BytesIO, 'png')  →  PIL Image  →  numpy
+#   float32 array / 255  →  torch.Tensor (1, H, W, 3)
+
+class ChannelXYPlot:
+    """
+    Plot two CHANNEL signals as an XY line chart using matplotlib.
+    The x_channel drives the horizontal axis; y_channel drives the vertical axis.
+    Outputs a standard ComfyUI IMAGE tensor: shape (1, H, W, 3), float32, range [0, 1].
+
+    If the two channels have different lengths, the shorter one determines the
+    number of plotted points (silent, safe truncation — no crash).
+
+    Requires matplotlib: pip install matplotlib
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "x_channel": ("CHANNEL",),
+                "y_channel": ("CHANNEL",),
+                "width":  ("INT", {"default": 800, "min": 100, "max": 4096, "step": 1}),
+                "height": ("INT", {"default": 600, "min": 100, "max": 4096, "step": 1}),
+                "dpi":    ("INT", {"default": 100, "min": 50,  "max": 300,  "step": 1}),
+            }
+        }
+
+    RETURN_TYPES   = ("IMAGE",)
+    RETURN_NAMES   = ("plot",)
+    FUNCTION       = "plot"
+    CATEGORY       = "timeseries"
+    DESCRIPTION    = (
+        "Plot two CHANNEL signals as an XY chart using matplotlib. "
+        "x_channel → horizontal axis, y_channel → vertical axis. "
+        "Requires: pip install matplotlib"
+    )
+    SEARCH_ALIASES = ["plot", "xy plot", "chart", "graph", "visualize", "signal"]
+
+    def plot(self, x_channel, y_channel, width: int, height: int, dpi: int):
+        if not _MATPLOTLIB_AVAILABLE:
+            raise RuntimeError(
+                "ChannelXYPlot requires matplotlib. "
+                "Install it with: pip install matplotlib"
+            )
+
+        x_data = np.asarray(x_channel["data"], dtype=np.float64)
+        y_data = np.asarray(y_channel["data"], dtype=np.float64)
+
+        # Trim to the shorter series — lengths must match for a well-formed plot
+        n = min(len(x_data), len(y_data))
+        x_data = x_data[:n]
+        y_data = y_data[:n]
+
+        # Build axis labels from channel metadata (name + unit)
+        x_name  = x_channel.get("name") or x_channel.get("source_name", "X")
+        y_name  = y_channel.get("name") or y_channel.get("source_name", "Y")
+        x_unit  = x_channel.get("unit") or x_channel.get("source_unit", "")
+        y_unit  = y_channel.get("unit") or y_channel.get("source_unit", "")
+        x_label = f"{x_name} [{x_unit}]" if x_unit else x_name
+        y_label = f"{y_name} [{y_unit}]" if y_unit else y_name
+
+        # Create figure at the requested pixel size (matplotlib works in inches)
+        fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+        ax.plot(x_data, y_data, linewidth=1.0)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        # Render to in-memory PNG → PIL Image → numpy → torch tensor
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi)
+        plt.close(fig)    # Release matplotlib memory — important for repeated executions
+        buf.seek(0)
+
+        pil_img = _PIL_Image.open(buf).convert("RGB")
+        arr     = np.array(pil_img).astype(np.float32) / 255.0  # (H, W, 3), range [0, 1]
+        tensor  = torch.from_numpy(arr)[None,]                   # (1, H, W, 3)
+
+        return (tensor,)
+
+
+# ---------------------------------------------------------------------------
 # Extension registration  (V1 legacy style — both nodes in NODE_CLASS_MAPPINGS)
 # ---------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
     "LoadTimeseries": LoadTimeseries,
     "ChannelMapper":  ChannelMapper,
+    "ChannelXYPlot":  ChannelXYPlot,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadTimeseries": "Load Timeseries",
     "ChannelMapper":  "Channel Mapper",
+    "ChannelXYPlot":  "Channel XY Plot",
 }
 
 # JS extensions are served from the ./js directory.
