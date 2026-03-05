@@ -154,6 +154,100 @@ and mount then.
 
 ---
 
+## JS File Serving (WEB_DIRECTORY)
+
+> **Without this, your JS extension is never loaded and `nodeCreated` never fires.**
+
+Every custom node package that ships a JavaScript extension **must** declare `WEB_DIRECTORY` at module level in `__init__.py`:
+
+```python
+WEB_DIRECTORY = "./js"
+```
+
+ComfyUI scans this attribute at startup and serves every `.js` file in the named directory.  Without it, `nodeCreated` never fires and all widget/slot customisation is silently absent — widgets appear with default ComfyUI styling and none of your JS code runs.
+
+**Diagnostic:** add a top-level log at the very top of your JS file (outside any function):
+
+```javascript
+console.log("[MyNode] Extension module loaded.");
+```
+
+If this line does **not** appear in the browser console after a hard-refresh (Cmd/Ctrl+Shift+R), the file is not being served.  Check `WEB_DIRECTORY` and restart ComfyUI.
+
+---
+
+## HTTP Route Registration
+
+> **`server.app.router.add_get()` silently fails; use the decorator pattern.**
+
+To add custom API endpoints from a custom node, use the `@PromptServer.instance.routes.get()` decorator directly on the handler — the same pattern used throughout this package:
+
+```python
+# __init__.py  (or a module imported by __init__.py)
+from aiohttp import web
+from server import PromptServer
+
+@PromptServer.instance.routes.get("/my_node/data")
+async def my_handler(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
+```
+
+**Why the alternative fails:** `server.app.router.add_get()` calls a method on `aiohttp`'s `UrlDispatcher` directly.  Depending on when custom nodes are loaded relative to server startup, the router may already be frozen or the route may be registered on the wrong instance.  The decorator pattern registers on `PromptServer.instance.routes` (a `RouteTableDef`) which is guaranteed to be picked up before the server starts.
+
+**Wrapping in a helper:** if you prefer to keep handlers in a separate `routes.py`, import `PromptServer` there and apply the decorator at module level.  In `__init__.py`, `from . import routes` is enough to trigger registration.
+
+---
+
+## Widget Hiding (Three-Flag Pattern)
+
+> **`computeSize` alone is not enough — the widget still paints.**
+
+To completely hide a widget from the canvas (e.g. an internal JSON serialisation bus), three flags are required:
+
+```javascript
+widget.type        = "hidden";          // ComfyUI/LiteGraph marker
+widget.computeSize = () => [0, -4];     // allocate zero vertical space
+widget.draw        = () => {};          // suppress the draw call entirely
+widget.serialize   = true;              // value still round-trips through save/load
+```
+
+Setting only `computeSize` leaves a visible gap or still paints the widget row.  All three must be set together.  Re-apply in `loadedGraphNode` because `configure()` can restore the widget's original state.
+
+**Exception:** if the widget must remain visible in the *Parameters inspector tab* but invisible on the canvas (e.g. a `customtext` notes widget), do NOT set `type = "hidden"` — that flag is what the Parameters tab checks to decide whether to render an editable control.  Use only `computeSize` and `draw` in that case.
+
+---
+
+## Widget-as-Input: Native Hover-to-Connect
+
+> **Add `widget: {name}` to the slot's extra_info to get the native ComfyUI connection affordance on the widget row.**
+
+When a node has scalar inputs (FLOAT, INT, STRING, BOOLEAN) that should accept both a typed value widget *and* a wire connection (like `width`/`height`/`dpi` on ChannelXYPlot), the correct pattern is:
+
+1. Add the widget first.
+2. Add the input slot with `widget: { name: widgetName }` in `extra_info`.
+
+```javascript
+// 1. Widget — provides the editable default value
+node.addWidget("number", "gain", defaultVal, onChange, { serialize: false });
+
+// 2. Linked input slot — the widget: property is the key
+node.addInput("gain", "FLOAT", {
+    localized_name: "gain",
+    widget: { name: "gain" },   // ← links the slot to the widget above
+});
+```
+
+**What `widget: {name}` does:**
+- Suppresses the separate left-side slot indicator — the connection affordance appears **on the widget row** instead.
+- Hovering with a compatible wire shows the native connection circle.
+- Dragging from a compatible output highlights the widget as a valid drop target.
+- When a wire is connected, the backend receives the value via `kwargs[name]` (takes priority over the widget value in `execute()`).
+
+**Wrong approach — manual slot + `onConnectionsChange` hide/show:**
+Adding a plain `node.addInput(...)` without the `widget` link creates a *separate* slot indicator on the left side of the node — visually cluttered and not native behaviour.  Manually hiding the widget via `onConnectionsChange` is fragile and unnecessary; the native mechanism handles it.
+
+---
+
 ## Key ComfyUI APIs Used
 
 ### Extension Hooks

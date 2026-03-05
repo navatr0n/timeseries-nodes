@@ -64,8 +64,8 @@ class LoadTimeseries:
     RETURN_TYPES = ("TIMESERIES",)
     RETURN_NAMES = ("timeseries",)
     OUTPUT_TOOLTIPS = (
-        "Dict containing all CSV columns as numpy float64 arrays, "
-        "plus metadata (columns list, sample_rate, time axis).",
+        "Dict containing all CSV channels as numpy float64 arrays, "
+        "plus metadata (channels list, units list, sample_rate, time axis).",
     )
     FUNCTION = "load"
     CATEGORY = "timeseries"
@@ -86,7 +86,8 @@ class LoadTimeseries:
 
         timeseries: TimeseriesDict = {
             "data": data,
-            "columns": columns,
+            "channels": columns,
+            "units": [""] * len(columns),
             "sample_rate": sample_rate,
             "time": time_array,
             "source_file": os.path.basename(file),

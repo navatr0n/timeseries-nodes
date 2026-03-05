@@ -183,14 +183,16 @@ function syncInfoPanelOutputs(node, rows) {
 
   // Build V1-format arrays that ComfyNodeDefImpl's constructor reads from
   // (it calls transformNodeDefV1ToV2 internally to build the V2 .outputs array).
-  const names    = rows.length > 0
+  // Output 0 is always the annotated TIMESERIES; outputs 1..N are CHANNELs.
+  const channelNames = rows.length > 0
     ? rows.map((row, i) => row.name || row.source || `channel_${i}`)
     : ['channel_0'];
-  const types    = names.map(() => 'CHANNEL');
+  const names    = ['timeseries', ...channelNames];
+  const types    = ['TIMESERIES', ...channelNames.map(() => 'CHANNEL')];
   const isList   = names.map(() => false);
-  const tooltips = rows.length > 0
+  const tooltips = ['', ...(rows.length > 0
     ? rows.map((row) => row.source_unit ? `[${row.source_unit}]` : '')
-    : [''];
+    : [''])];
 
   // Re-register with updated V1 output fields.
   // addNodeDef() does: t.value['ChannelMapper'] = newSv  ← KEY REASSIGNMENT
@@ -251,38 +253,48 @@ function saveMappingToWidget(node, rows) {
 function computeNodeHeight(rowCount) {
   const N = Math.max(rowCount, 1);
   const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX;
-  // Last output slot center is at Y = (N - 0.3) * LG_SLOT_HEIGHT; approximate
-  // the slot area height as N * LG_SLOT_HEIGHT (adds a bit of breathing room).
-  const slotAreaHeight = N * LG_SLOT_HEIGHT;
+  // +1 accounts for the fixed TIMESERIES output slot at index 0.
+  const slotAreaHeight = (N + 1) * LG_SLOT_HEIGHT;
   return Math.max(tableHeight, slotAreaHeight) + LG_NODE_PADDING;
 }
 
 /** Sync output slots to match the current mapping rows and resize the node. */
 function syncOutputSlots(node, rows) {
-  const desired = rows.length || 1; // always keep at least 1 slot
+  const channelCount = rows.length || 1; // always keep at least 1 CHANNEL slot
+  const totalDesired = channelCount + 1; // +1 for the TIMESERIES slot at index 0
 
-  // Add missing slots
-  while (node.outputs.length < desired) {
-    const idx = node.outputs.length;
+  // Ensure output[0] is always the annotated TIMESERIES output.
+  if (node.outputs.length === 0) {
+    node.addOutput("timeseries", "TIMESERIES");
+  } else if (node.outputs[0].type !== "TIMESERIES") {
+    node.outputs[0].type          = "TIMESERIES";
+    node.outputs[0].name          = "timeseries";
+    node.outputs[0].localized_name = "timeseries";
+  }
+
+  // Add missing CHANNEL slots (indices 1..channelCount)
+  while (node.outputs.length < totalDesired) {
+    const idx = node.outputs.length - 1; // channel index (0-based among channels)
     node.addOutput(`channel_${idx}`, "CHANNEL");
   }
-  // Remove excess slots (from the end, only if unconnected)
-  while (node.outputs.length > desired) {
+  // Remove excess CHANNEL slots (from the end, only if unconnected)
+  while (node.outputs.length > totalDesired) {
     const last = node.outputs[node.outputs.length - 1];
     if (last.links && last.links.length > 0) break; // don't remove connected slots
     node.removeOutput(node.outputs.length - 1);
   }
 
-  // Rename slots to match the user-assigned channel names.
+  // Rename CHANNEL slots to match the user-assigned channel names.
+  // CHANNEL outputs start at index 1 (index 0 is always TIMESERIES).
   // Must write BOTH name and localized_name: LiteGraph renders
   // `label || localized_name || name`, and ComfyUI's addOutputs() sets
-  // localized_name = "channel_0" before nodeCreated fires, so writing
-  // only name leaves localized_name as the stale "channel_0".
+  // localized_name before nodeCreated fires.
   rows.forEach((row, i) => {
-    if (node.outputs[i]) {
+    const outIdx = i + 1; // offset by 1 for the TIMESERIES slot
+    if (node.outputs[outIdx]) {
       const label = row.name || row.source || `channel_${i}`;
-      node.outputs[i].name = label;
-      node.outputs[i].localized_name = label;
+      node.outputs[outIdx].name = label;
+      node.outputs[outIdx].localized_name = label;
     }
   });
 
@@ -378,7 +390,7 @@ function buildTableWidget(node) {
   // Header row
   const thead = table.createTHead();
   const hrow = thead.insertRow();
-  const headers = ["Source", "Name", "Pol", "Src Unit", "Tgt Unit", "Gain", "Offset", ""];
+  const headers = ["Source", "Name", "Pol", "Source Units", "Target Units", "Gain", "Offset", ""];
   headers.forEach((h) => {
     const th = document.createElement("th");
     th.textContent = h;
@@ -472,13 +484,14 @@ function buildTableWidget(node) {
       el.addEventListener("input", () => {
         if (key === "name") {
           const rowIdx = rows.indexOf(rowData);
-          if (node.outputs[rowIdx]) {
+          const outIdx = rowIdx + 1; // +1 because output[0] is the TIMESERIES slot
+          if (node.outputs[outIdx]) {
             // Write both name and localized_name — LiteGraph renders
             // `label || localized_name || name`, so updating only name
             // leaves the stale localized_name ("channel_0") as the winner.
             const label = el.value || rowData.source || `channel_${rowIdx}`;
-            node.outputs[rowIdx].name = label;
-            node.outputs[rowIdx].localized_name = label;
+            node.outputs[outIdx].name = label;
+            node.outputs[outIdx].localized_name = label;
             node.setDirtyCanvas(true);
           }
         }
@@ -529,11 +542,21 @@ function buildTableWidget(node) {
 
     computeSize: () => [node.size[0], 0],
 
-    // Expose a method to rebuild rows from a column list
-    setColumns(columns) {
-      // Keep rows that still exist in the new column list
+    // Expose a method to rebuild rows from a channel list and optional units.
+    // units[i] is the source unit for channels[i] (from upstream timeseries).
+    // For new rows: source_unit is pre-filled from units[i]; target unit
+    // defaults to match source_unit when target is otherwise empty.
+    setColumns(channels, units = []) {
+      // Keep rows that still exist in the new channel list
       const existing = new Map(rows.map((r) => [r.source, r]));
-      const next = columns.map((col) => existing.get(col) || defaultRow(col));
+      const next = channels.map((col, i) => {
+        if (existing.has(col)) return existing.get(col);
+        const srcUnit = units[i] || "";
+        const row = defaultRow(col);
+        row.source_unit = srcUnit;
+        row.unit = srcUnit; // default target = source when adding a new row
+        return row;
+      });
       rows.length = 0;
       next.forEach((r) => rows.push(r));
 
@@ -815,10 +838,10 @@ app.registerExtension({
       const upstreamNode = findUpstreamNode(node, 0);
       if (!upstreamNode) return;
 
-      fetchColumnsFromNode(upstreamNode).then((columns) => {
-        if (columns?.length) {
+      fetchColumnsFromNode(upstreamNode).then((result) => {
+        if (result?.channels?.length) {
           const tableWidget = node.widgets?.find((w) => w.name === "_channel_table");
-          tableWidget?.setColumns(columns);
+          tableWidget?.setColumns(result.channels, result.units ?? []);
         }
       });
     };
@@ -878,21 +901,42 @@ function findUpstreamNode(node, slotIdx) {
 }
 
 /**
- * Fetch the column list for a LoadTimeseries node by reading its "file" widget
- * and querying a lightweight server endpoint.
+ * Fetch channels and units from an upstream node.
+ *
+ * LoadTimeseries: reads the file widget and queries the /timeseries/columns
+ * endpoint which returns {channels, units} (units are empty for raw CSV files).
+ *
+ * ChannelMapper: reads the upstream node's table widget directly to get the
+ * channel names (source column) and their configured target units — these
+ * become the source units for the downstream mapper.
+ *
+ * Returns {channels: string[], units: string[]} or null.
  */
-async function fetchColumnsFromNode(loaderNode) {
-  const fileWidget = loaderNode.widgets?.find((w) => w.name === "file");
-  if (!fileWidget?.value) return null;
-
-  try {
-    const resp = await fetch(
-      `/timeseries/columns?file=${encodeURIComponent(fileWidget.value)}`
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.columns ?? null;
-  } catch {
-    return null;
+async function fetchColumnsFromNode(upstreamNode) {
+  // Case 1: LoadTimeseries — fetch from the CSV file endpoint
+  const fileWidget = upstreamNode.widgets?.find((w) => w.name === "file");
+  if (fileWidget?.value) {
+    try {
+      const resp = await fetch(
+        `/timeseries/columns?file=${encodeURIComponent(fileWidget.value)}`
+      );
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return { channels: data.channels ?? [], units: data.units ?? [] };
+    } catch {
+      return null;
+    }
   }
+
+  // Case 2: ChannelMapper upstream — read its table rows directly.
+  // The upstream mapper's target units become the source units here.
+  if (upstreamNode.comfyClass === "ChannelMapper") {
+    const tableWidget = upstreamNode.widgets?.find((w) => w.name === "_channel_table");
+    const upstreamRows = tableWidget?._rows ?? [];
+    const channels = upstreamRows.map((r) => r.source).filter(Boolean);
+    const units    = upstreamRows.map((r) => r.unit || "");
+    return channels.length ? { channels, units } : null;
+  }
+
+  return null;
 }

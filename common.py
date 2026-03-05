@@ -27,8 +27,9 @@ except ImportError:
 
 class TimeseriesDict(TypedDict):
     """The TIMESERIES custom type that flows between nodes."""
-    data: dict            # column_name (str) -> numpy.ndarray (1-D float64)
-    columns: list         # ordered list of column name strings
+    data: dict            # channel_name (str) -> numpy.ndarray (1-D float64)
+    channels: list        # ordered list of channel name strings
+    units: list           # unit label per channel, parallel to channels ("" if unknown)
     sample_rate: float | None  # samples/sec if detected from time column, else None
     time: np.ndarray | None    # time axis values, or None
     source_file: str           # original filename (basename only)

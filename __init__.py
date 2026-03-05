@@ -72,6 +72,6 @@ async def get_timeseries_columns(request: web.Request) -> web.Response:
     filepath = folder_paths.get_annotated_filepath(filename)
     try:
         columns, _ = _load_csv(filepath)
-        return web.json_response({"columns": columns})
+        return web.json_response({"channels": columns, "units": [""] * len(columns)})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
