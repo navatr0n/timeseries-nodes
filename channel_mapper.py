@@ -83,6 +83,7 @@ class ChannelMapper:
                 "timeseries": ("TIMESERIES",),
                 # JSON array serialised by the frontend table widget.
                 # Each element: {source, name, polarity, source_unit, unit, gain, offset}
+                # (source_unit is a display hint in the table; unit is stored in CHANNEL.units)
                 "channel_mapping": ("STRING", {"default": _EMPTY_MAPPING}),
             },
             "optional": {
@@ -120,7 +121,7 @@ class ChannelMapper:
 
         rows = _parse_channel_mapping(channel_mapping)
         results = []
-        # Track source_unit per source column so we can annotate the timeseries.
+        # Track target unit per source column for the output timeseries annotation.
         unit_map: dict[str, str] = {}
 
         for row in rows:
@@ -129,30 +130,26 @@ class ChannelMapper:
                 results.append(None)
                 continue
 
-            name:        str   = row.get("name", source_col)
-            polarity:    int   = int(row.get("polarity", 1))
-            source_unit: str   = row.get("source_unit", "")
-            unit:        str   = row.get("unit", "")
-            gain:        float = float(row.get("gain", 1.0))
-            offset:      float = float(row.get("offset", 0.0))
+            name:     str   = row.get("name", source_col)
+            polarity: int   = int(row.get("polarity", 1))
+            unit:     str   = row.get("unit", "")
+            gain:     float = float(row.get("gain", 1.0))
+            offset:   float = float(row.get("offset", 0.0))
 
             # Clamp polarity to ±1
             polarity = 1 if polarity >= 0 else -1
 
-            unit_map[source_col] = unit  # target unit goes into the output timeseries
+            unit_map[source_col] = unit
 
             arr = ts_data[source_col].copy().astype(np.float64)
             arr = polarity * gain * arr + offset
 
             channel: ChannelDict = {
                 "data":        arr,
+                "source_file": timeseries.get("source_file", ""),
                 "source_name": source_col,
                 "name":        name,
-                "polarity":    polarity,
-                "source_unit": source_unit,
-                "unit":        unit,
-                "gain":        gain,
-                "offset":      offset,
+                "units":       unit,
                 "sample_rate": ts_sr,
             }
             results.append(channel)

@@ -88,18 +88,32 @@ class ChannelXYPlot:
         # Build axis labels from channel metadata (name + unit)
         x_name  = x_channel.get("name") or x_channel.get("source_name", "X")
         y_name  = y_channel.get("name") or y_channel.get("source_name", "Y")
-        x_unit  = x_channel.get("unit") or x_channel.get("source_unit", "")
-        y_unit  = y_channel.get("unit") or y_channel.get("source_unit", "")
-        x_label = f"{x_name} [{x_unit}]" if x_unit else x_name
-        y_label = f"{y_name} [{y_unit}]" if y_unit else y_name
+        x_unit  = x_channel.get("units", "")
+        y_unit  = y_channel.get("units", "")
+        x_label = f"{x_name} - [{x_unit}]" if x_unit else x_name
+        y_label = f"{y_name} - [{y_unit}]" if y_unit else y_name
 
         # Create figure at the requested pixel size (matplotlib works in inches)
+        x_src = x_channel.get("source_file", "")
+        y_src = y_channel.get("source_file", "")
+        if x_src == y_src:
+            source_note = f"Source: {x_src}" if x_src else ""
+        else:
+            source_note = f"Source: {x_src} / {y_src}"
+
         fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
         ax.plot(x_data, y_data, linewidth=1.0)
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        if source_note:
+            fig.text(
+                0.99, 0.01, source_note,
+                ha="right", va="bottom",
+                fontsize=7, color="gray", style="italic",
+                transform=fig.transFigure,
+            )
 
         # Render to in-memory PNG → PIL Image → numpy → torch tensor
         buf = _io.BytesIO()

@@ -37,14 +37,11 @@ class TimeseriesDict(TypedDict):
 
 class ChannelDict(TypedDict):
     """The CHANNEL custom type; one per output slot of ChannelMapper."""
-    data: np.ndarray          # 1-D float64 array with transforms applied
+    data: np.ndarray          # 1-D float64 array with transforms already applied
+    source_file: str          # basename of the originating CSV file
     source_name: str          # original column name from the source file
     name: str                 # user-assigned display name
-    polarity: int             # +1 or -1
-    source_unit: str          # unit label of the raw signal
-    unit: str                 # unit label after conversion
-    gain: float               # raw→engineering multiplier
-    offset: float             # additive offset applied after gain
+    units: str                # engineering unit label of the signal (target unit)
     sample_rate: float | None
 
 
