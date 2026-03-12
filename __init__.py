@@ -5,7 +5,7 @@ Nodes
 -----
 LoadTimeseries  -- Load a CSV file and output a TIMESERIES dict.
 ChannelMapper   -- Map CSV columns into named, scaled CHANNEL outputs.
-ChannelXYPlot   -- Plot two CHANNEL signals as an XY chart (IMAGE output).
+ChannelXYPlot   -- Plot two CHANNEL signals as an XY chart (IMAGE output). Display name: XY-Plotter-Simple.
 
 Dependencies:
   - numpy      (required, already in ComfyUI requirements.txt)
@@ -44,7 +44,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadTimeseries": "Load Timeseries",
     "ChannelMapper":  "Channel Mapper",
-    "ChannelXYPlot":  "Channel XY Plot",
+    "ChannelXYPlot":  "XY-Plotter-Simple",
 }
 
 # JS extensions are served from the ./js directory.

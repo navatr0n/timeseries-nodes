@@ -53,6 +53,7 @@ class ChannelXYPlot:
             "required": {
                 "x_channel": ("CHANNEL",),
                 "y_channel": ("CHANNEL",),
+                "plot_type": (["line", "scatter"],),
                 "width":  ("INT", {"default": 800, "min": 100, "max": 4096, "step": 1}),
                 "height": ("INT", {"default": 600, "min": 100, "max": 4096, "step": 1}),
                 "dpi":    ("INT", {"default": 100, "min": 50,  "max": 300,  "step": 1}),
@@ -70,7 +71,7 @@ class ChannelXYPlot:
     )
     SEARCH_ALIASES = ["plot", "xy plot", "chart", "graph", "visualize", "signal"]
 
-    def plot(self, x_channel, y_channel, width: int, height: int, dpi: int):
+    def plot(self, x_channel, y_channel, plot_type: str, width: int, height: int, dpi: int):
         if not _MATPLOTLIB_AVAILABLE:
             raise RuntimeError(
                 "ChannelXYPlot requires matplotlib. "
@@ -102,7 +103,10 @@ class ChannelXYPlot:
             source_note = f"Source: {x_src} / {y_src}"
 
         fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-        ax.plot(x_data, y_data, linewidth=1.0)
+        if plot_type == "scatter":
+            ax.scatter(x_data, y_data, s=4, linewidths=0)
+        else:
+            ax.plot(x_data, y_data, linewidth=1.0)
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.grid(True, alpha=0.3)
