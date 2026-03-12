@@ -55,16 +55,14 @@ import { api } from "../../scripts/api.js";
 // This ghost is a well-known class of Safari compositing artifacts with
 // position:fixed + CSS transforms.
 //
-// ─── THE _visible FLAG ─────────────────────────────────────────────────
+// ─── VISIBILITY — PER-FRAME GRAPH MEMBERSHIP CHECK ─────────────────────
 //
-// positionTableDOM() runs on every draw frame and sets display:block.
-// Graph-navigation events (litegraph:set-graph, graphCleared) set
-// display:none.  Without a flag, the per-frame display:block would
-// immediately override display:none, causing the table to appear when
-// the node's graph is not active.
-//
-// Solution: syncTableVisibility sets widget._visible = false; then
-// positionTableDOM checks _visible before setting display:block.
+// positionTableDOM() runs on every draw frame from the global canvas hook.
+// Visibility is determined by checking app.canvas.graph._nodes each frame —
+// the table shows only when the node is in the active graph.  This replaces
+// the old event-driven _visible flag (syncTableVisibility / onGraphCleared)
+// which fired spuriously during setSize(), permanently hiding the table when
+// a TIMESERIES was connected in Node 2.0 mode.
 //
 // ─── LAZY DOM MOUNTING ─────────────────────────────────────────────────
 //
@@ -97,13 +95,21 @@ import { api } from "../../scripts/api.js";
 // ---------------------------------------------------------------------------
 // LiteGraph layout constants (must match what LiteGraph uses internally)
 // ---------------------------------------------------------------------------
-const LG_TITLE_HEIGHT  = 30;  // px – node title bar
+const LG_TITLE_HEIGHT  = 30;  // px – node title bar (rendered ABOVE node.pos[1], not counted in node.size[1])
 const LG_SLOT_HEIGHT   = 20;  // px – height of each input/output slot row
 const LG_WIDGET_HEIGHT = 22;  // px – height of a standard widget row
-const LG_NODE_PADDING  = 50;  // px – bottom padding inside node body (keeps table from touching node edge)
+// LG_NODE_PADDING must satisfy: LG_NODE_PADDING >= classicOffset + 10.
+// _arrangeWidgets accumulates: l = tH + classicOffset + 10 + NOTES_WIDGET_HEIGHT.
+// bodyHeight = tH + NOTES_WIDGET_HEIGHT + LG_NODE_PADDING.
+// If l > bodyHeight, _arrangeWidgets fires an auto-resize that node.onResize then snaps
+// back, leaving the node one frame short. With classicOffset=15, minimum is 15+10=25.
+// Use 30 for a comfortable bottom margin.
+const LG_NODE_PADDING  = 45;  // px – bottom clearance below the notes textarea (must be >= classicOffset+10)
+const NOTES_WIDGET_HEIGHT = 50; // px – notes textarea visible height (DOMWidgetImpl default minHeight)
 const TABLE_ROW_PX     = 26;  // px – actual rendered row height (12px font + cell padding + border)
 const TABLE_HEADER_PX  = 22;  // px – approximate height of the table header row
 const TABLE_PAD_PX     = 10;  // px – breathing room above/below table content
+const BUTTON_FOOTER_HEIGHT = 36; // px – footer bar height below the table (Save/Load buttons)
 const NODE_MIN_WIDTH       = 400; // px – minimum node width in canvas space
 const OUTPUT_SLOT_MARGIN   = 100; // px – right-side gap for output slot labels (1/4 of NODE_MIN_WIDTH)
 
@@ -241,21 +247,29 @@ function saveMappingToWidget(node, rows) {
 }
 
 /**
- * Compute the ideal node height given the current row count.
+ * Compute the ideal node BODY height given the current row count.
  *
- * Key insight: LiteGraph draws slot dots starting at Y=0 from the node body
- * top. Output slot i is at Y = (i + 0.7) * LG_SLOT_HEIGHT. The DOM table
- * overlay ALSO starts at Y=0. They OVERLAP vertically — they are NOT stacked.
+ * IMPORTANT: node.size[1] is the BODY height only. LiteGraph renders the title
+ * bar separately ABOVE node.pos[1] (at y = -NODE_TITLE_HEIGHT). Do NOT include
+ * LG_TITLE_HEIGHT here — that would double-count the title in Node 2.0.
  *
- * The correct node body height is whichever is taller: the table or the slot
- * area (so all slot dots and the full table are visible), plus bottom padding.
+ * Key insight: LiteGraph draws slot dots starting at Y=0 from the body top.
+ * Output slot i is at Y = (i + 0.7) * LG_SLOT_HEIGHT. The DOM table overlay
+ * ALSO starts at Y=0. They overlap vertically — they are NOT stacked.
+ *
+ * The body height must be tall enough to show all slot dots AND the full table,
+ * with additional space below for the notes widget and bottom clearance.
+ *
+ * LG_NODE_PADDING must stay >= 14 to prevent _arrangeWidgets from triggering
+ * spurious auto-resize. The extra offset comes from slot position math
+ * (i+0.7 factor → +4px), the start margin (+2px), and the inter-widget gap (+4px).
  */
 function computeNodeHeight(rowCount) {
   const N = Math.max(rowCount, 1);
-  const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX;
+  const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
   // +1 accounts for the fixed TIMESERIES output slot at index 0.
   const slotAreaHeight = (N + 1) * LG_SLOT_HEIGHT;
-  return Math.max(tableHeight, slotAreaHeight) + LG_NODE_PADDING;
+  return Math.max(tableHeight, slotAreaHeight) + NOTES_WIDGET_HEIGHT + LG_NODE_PADDING;
 }
 
 /** Sync output slots to match the current mapping rows and resize the node. */
@@ -303,6 +317,14 @@ function syncOutputSlots(node, rows) {
   const h = computeNodeHeight(rows.length);
   node.setSize([node.size[0], h]);
 
+  // Node 2.0: node.setSize() mutates the LiteGraph Float64Array in-place but does
+  // NOT update the YJS-backed layout store.  useLayoutSync watches the store and
+  // reverts any direct setSize() change.  Push the new height through the layout
+  // mutations API so the store (and therefore Vue) sees the correct size.
+  if (LiteGraph?.vueNodesMode) {
+    app.canvas.initLayoutMutations?.()?.resizeNode(node.id, { width: node.size[0], height: h });
+  }
+
   // Keep the Info inspector tab in sync with the current live channel names.
   // This replaces the static "channel_0" from /object_info with the actual rows.
   syncInfoPanelOutputs(node, rows);
@@ -317,6 +339,14 @@ function syncOutputSlots(node, rows) {
  * Returns the rows array so callers can initialise it from saved state.
  */
 function buildTableWidget(node) {
+  // Guard: during a Vue snapshot refresh triggered from setColumns, skip DOM
+  // reconstruction — the table is already up-to-date.  Return the existing
+  // widget so callers get a valid { widget, rows } object.
+  if (node._cmVueRefresh) {
+    const existingW = node.widgets?.find((w) => w.name === "_channel_table");
+    return { widget: existingW, rows: existingW?._rows ?? [] };
+  }
+
   // ---- Remove any existing table widget ----
   const existing = node.widgets?.find((w) => w.name === "_channel_table");
   if (existing) {
@@ -408,6 +438,103 @@ function buildTableWidget(node) {
 
   const tbody = table.createTBody();
   container.appendChild(table);
+
+  // ---- Save / Load footer ----
+
+  // Hidden file input — created once per table build, triggered by the Load button.
+  const fileInput = document.createElement("input");
+  fileInput.type   = "file";
+  fileInput.accept = ".json";
+  fileInput.style.display = "none";
+  container.appendChild(fileInput);
+
+  const footer = document.createElement("div");
+  footer.style.cssText = `
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 8px; padding: 4px 8px;
+    border-top: 1px solid #555;
+    background: rgba(25,25,25,0.95);
+    box-sizing: border-box;
+    height: ${BUTTON_FOOTER_HEIGHT}px;
+    pointer-events: auto;
+  `;
+
+  function makeFooterButton(label, title) {
+    const btn = document.createElement("button");
+    btn.textContent = label;
+    btn.title       = title;
+    btn.style.cssText = `
+      background: #2a2a2a; border: 1px solid #555; color: #ccc;
+      cursor: pointer; padding: 3px 10px; font-size: 11px;
+      font-family: Arial, sans-serif; border-radius: 3px;
+      pointer-events: auto; height: 24px; white-space: nowrap;
+    `;
+    return btn;
+  }
+
+  // Save: serialize current rows to a pretty-printed JSON file download.
+  const saveBtn = makeFooterButton("Save Map to File", "Export channel mapping as JSON");
+  saveBtn.addEventListener("click", () => {
+    const json = JSON.stringify(rows, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = "channel_mapping.json";
+    document.body.appendChild(a);  // required for Firefox
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // Load: pick a .json file, validate it, then rebuild the table.
+  const loadBtn = makeFooterButton("Load Map from File", "Import channel mapping from JSON file");
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      let loadedRows;
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (!Array.isArray(parsed)) throw new Error("Expected a JSON array");
+        loadedRows = parsed.filter(
+          (r) => r && typeof r === "object" && typeof r.source === "string"
+        );
+        if (loadedRows.length === 0) throw new Error("No valid rows found");
+      } catch (err) {
+        console.error("[ChannelMapper] Load failed:", err.message);
+        alert(`Channel Mapper: Could not load file.\n${err.message}`);
+        fileInput.value = "";
+        return;
+      }
+
+      // 1. Write loaded rows to the hidden channel_mapping widget (source of truth).
+      saveMappingToWidget(node, loadedRows);
+
+      // 2. Remove old DOM element so the lazy-mount guard re-fires on next draw.
+      const tw = node.widgets?.find((w) => w.name === "_channel_table");
+      tw?._tableEl?.remove();
+
+      // 3. Rebuild the table widget from the newly-written widget value.
+      buildTableWidget(node);
+
+      // 4. Sync output slots to the loaded row count.
+      const newTw = node.widgets?.find((w) => w.name === "_channel_table");
+      if (newTw) syncOutputSlots(node, newTw._rows);
+
+      fileInput.value = "";  // reset so the same file can be re-selected
+      app.graph?.setDirtyCanvas(true);
+    };
+    reader.readAsText(file);
+  });
+
+  loadBtn.addEventListener("click", () => fileInput.click());
+
+  footer.appendChild(saveBtn);
+  footer.appendChild(loadBtn);
+  container.appendChild(footer);
 
   // ---- Row management ----
   function cellInput(value, width, type = "text") {
@@ -531,16 +658,53 @@ function buildTableWidget(node) {
   rows.forEach((row, i) => addRow(row, i));
 
   // ---- Custom widget object ----
-  // computeSize returns [width, 0] so LiteGraph allocates no vertical space
-  // for this widget — the DOM overlay is positioned absolutely instead.
+  // draw is a no-op — the fixed-position DOM overlay handles all visuals.
+  const tableContentHeight = () =>
+    TABLE_HEADER_PX + rows.length * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
+
   const widget = {
     name: "_channel_table",
     type: "DOM",
     _tableEl: container,
     _rows: rows,
-    _visible: true,   // visibility flag — controlled by syncTableVisibility / onGraphCleared
-
-    computeSize: () => [node.size[0], 0],
+    // Classic LiteGraph & Node 2.0 — _arrangeWidgets layout bridging:
+    //
+    // _arrangeWidgets (api-Cllpqoko.js) places widgets sequentially starting at:
+    //   n = (slot_bounding_box_bottom - node.pos[1]) + 2
+    //
+    // Classic mode: slot positions use nodeY = node.pos[1] (title top), so
+    //   slot[i] canvas Y = node.pos[1] + (i + 0.7) * slotH
+    //   slot bounding box bottom = node.pos[1] + (channelCount + 1.2) * slotH
+    //   n = (channelCount + 1.2) * slotH + 2  =  slotAreaH + 6  (title-relative)
+    //
+    // Node 2.0 mode: slot positions use nodeY = bodyY = node.pos[1] + titleH, so
+    //   slot bounding box bottom = node.pos[1] + titleH + (channelCount + 1.2) * slotH
+    //   n = titleH + slotAreaH + 6  (30 px larger than classic)
+    //
+    // DOMWidget screen Y = convert(node.pos[1] + DEFAULT_MARGIN + widget.y)
+    //   where DEFAULT_MARGIN = 10 (confirmed in dialogService bundle).
+    //
+    // DOM table body-Y range: [0, tH]. Its canvas bottom = node.pos[1] + titleH + tH.
+    // For notes to start exactly at DOM table bottom (body Y = tH, no overlap/gap):
+    //   node.pos[1] + 10 + notes.y  =  node.pos[1] + titleH + tH
+    //   notes.y  =  titleH + tH - 10  =  tH + 20
+    //
+    // notes.y = n + computeSize()[1] + 4  →  computeSize()[1] = tH + 20 - n - 4
+    //   Classic:  tH + 20 - (slotAreaH + 6) - 4  =  tH - slotAreaH + 10
+    //   Node 2.0: tH + 20 - (titleH + slotAreaH + 6) - 4  =  tH - slotAreaH - 20
+    computeSize: () => {
+      const channelCount = rows.length || 1;
+      const effectiveSlotAreaH = (channelCount + 1) * LG_SLOT_HEIGHT;
+      const tH = tableContentHeight();
+      const offset = LiteGraph?.vueNodesMode ? -80 : 15;
+      return [node.size[0], Math.max(Math.max(tH, effectiveSlotAreaH) - effectiveSlotAreaH + offset, 0)];
+    },
+    // Node 2.0 — Vue reads computeLayoutSize for visual widget sizing hints.
+    // _arrangeWidgets uses computeSize (above) for widget.y assignment in both
+    // modes, so the offset derivation above fully controls placement.
+    computeLayoutSize: () => { const h = tableContentHeight(); return { minHeight: h, maxHeight: h, minWidth: 0 }; },
+    // No canvas drawing — DOM overlay handles all visuals.
+    draw: () => {},
 
     // Expose a method to rebuild rows from a channel list and optional units.
     // units[i] is the source unit for channels[i] (from upstream timeseries).
@@ -567,11 +731,34 @@ function buildTableWidget(node) {
       saveMappingToWidget(node, rows);
       syncOutputSlots(node, rows);
       app.graph?.setDirtyCanvas(true);
+
+      // Node 2.0: extractVueNodeData() captures a plain static snapshot of
+      // node.outputs at nodeCreated time.  addOutput() modifies the raw LiteGraph
+      // array but Vue never sees the update.  Re-fire onNodeAdded so that
+      // handleNodeAdded() re-snapshots node.outputs into the reactive Map and
+      // re-initialises the layout store entry from node.size (already correct).
+      // The _cmVueRefresh flag prevents buildTableWidget from rebuilding the DOM.
+      if (LiteGraph?.vueNodesMode) {
+        node._cmVueRefresh = true;
+        try {
+          app.graph?.onNodeAdded?.(node);
+        } finally {
+          node._cmVueRefresh = false;
+        }
+        app.graph?.setDirtyCanvas(true);
+      }
     },
   };
 
   node.widgets = node.widgets || [];
-  node.widgets.push(widget);
+  // Insert _channel_table BEFORE the notes widget so the table's layout height
+  // pushes notes below it in both classic and Node 2.0 layout.
+  const notesIdx = node.widgets.findIndex((w) => w.name === "notes");
+  if (notesIdx >= 0) {
+    node.widgets.splice(notesIdx, 0, widget);
+  } else {
+    node.widgets.push(widget);
+  }
 
   return { widget, rows };
 }
@@ -631,11 +818,8 @@ function measureOutputLabelWidth(ctx, rows) {
  * browser compositor can paint a "ghost" of the element at viewport (0,0)
  * when scale > ~1.5.  See DEVELOPER_NOTES.md for the full explanation.
  *
- * IMPORTANT: This function ONLY sets display:block when _visible is true.
- * The _visible flag is managed by syncTableVisibility (graph-switch events)
- * and onGraphCleared.  Without this guard, positionTableDOM would override
- * display:none on every frame and cause a stale table when the node is in
- * a graph that is not currently displayed.
+ * Visibility is determined per-frame by checking whether the node is in
+ * the currently active graph — no event-driven _visible flag needed.
  */
 function positionTableDOM(node, ctx) {
   const tableWidget = node.widgets?.find((w) => w.name === "_channel_table");
@@ -643,8 +827,15 @@ function positionTableDOM(node, ctx) {
 
   const el = tableWidget._tableEl;
 
-  // Respect the visibility flag set by syncTableVisibility / onGraphCleared.
-  if (!tableWidget._visible) {
+  // Per-frame graph membership check — more reliable than event-driven _visible flag.
+  // litegraph:set-graph fires spuriously during setSize(), which permanently hid the
+  // table in Node 2.0. Checking the live graph each frame avoids this entirely.
+  const activeGraph = app.canvas?.graph;
+  const nodeInGraph = !!(
+    activeGraph?._nodes?.includes(node) ||
+    activeGraph?.getNodeById?.(node.id)
+  );
+  if (!nodeInGraph) {
     el.style.display = "none";
     return;
   }
@@ -657,7 +848,12 @@ function positionTableDOM(node, ctx) {
     return;
   }
 
-  const canvasEl = ctx.canvas;
+  // Always use app.canvas.canvas (the main visible HTML element) for the
+  // bounding rect.  In Node 2.0 (component-based rendering), ctx.canvas may
+  // be an offscreen or sub-canvas whose getBoundingClientRect() returns wrong
+  // screen coordinates.  app.canvas.canvas is what canvasPosToClientPos() in
+  // the ComfyUI frontend always uses, so this keeps us consistent.
+  const canvasEl = app.canvas.canvas;
   const elRect   = canvasEl.getBoundingClientRect();
   const margin   = 15; // px – left inset so table doesn't touch node border
 
@@ -665,13 +861,16 @@ function positionTableDOM(node, ctx) {
   // Matches ComfyUI's useCanvasPositionConversion.ts:
   //   clientX = (canvasX + offset[0]) * scale + canvasElement.left
   // node.pos is the title bar top-left; body starts LG_TITLE_HEIGHT below.
+  // Read NODE_TITLE_HEIGHT dynamically so this stays correct if the value
+  // changes between standard and Node 2.0 rendering modes.
+  const titleH     = LiteGraph?.NODE_TITLE_HEIGHT ?? LG_TITLE_HEIGHT;
   const bodyX      = node.pos[0] + margin;
-  const bodyY      = node.pos[1] + LG_TITLE_HEIGHT;
+  const bodyY      = node.pos[1] + titleH;
   const screenLeft = (bodyX + ds.offset[0]) * scale + elRect.left;
   const screenTop  = (bodyY + ds.offset[1]) * scale + elRect.top;
 
   const rowCount          = tableWidget._rows?.length ?? 0;
-  const tableHeightCanvas = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX;
+  const tableHeightCanvas = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
 
   // Dynamic right margin: at least OUTPUT_SLOT_MARGIN (100px), expanding to
   // fit the longest Name label.  measureOutputLabelWidth returns the raw
@@ -704,6 +903,35 @@ function positionTableDOM(node, ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// Global canvas hook — fires in both classic and Node 2.0 rendering modes
+// ---------------------------------------------------------------------------
+
+let _globalHookSetup = false;
+
+function setupGlobalCanvasHook() {
+  if (_globalHookSetup) return;
+  _globalHookSetup = true;
+  const origDraw = app.canvas.onDrawForeground?.bind(app.canvas);
+  app.canvas.onDrawForeground = function (ctx, visibleArea) {
+    origDraw?.call(this, ctx, visibleArea);
+    for (const node of app.graph?._nodes ?? []) {
+      if (node.comfyClass !== "ChannelMapper") continue;
+      const tw = node.widgets?.find((w) => w.name === "_channel_table");
+      if (!tw?._tableEl) continue;
+      // Lazy DOM mount (covers both classic and Node 2.0)
+      if (!tw._tableEl.parentElement) {
+        const container =
+          document.getElementById("graph-canvas-container") ||
+          app.canvas.canvas.parentElement ||
+          document.body;
+        container.appendChild(tw._tableEl);
+      }
+      positionTableDOM(node, ctx);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Extension registration
 // ---------------------------------------------------------------------------
 
@@ -712,6 +940,7 @@ app.registerExtension({
 
   nodeCreated(node) {
     if (node.comfyClass !== "ChannelMapper") return;
+    setupGlobalCanvasHook();
 
     // ---- Completely hide the raw channel_mapping string widget ----
     // Must be done before buildTableWidget so the widget list is already trimmed.
@@ -723,70 +952,25 @@ app.registerExtension({
       mappingWidget.serialize    = true;           // still save the JSON value
     }
 
-    // ---- Suppress the notes widget on the canvas ----
-    // Notes are edited via the Parameters inspector tab; the canvas stays clean.
-    // IMPORTANT: do NOT set type="hidden" — that flag is what the Parameters tab
-    // checks to decide whether to render the widget as an interactive input.
-    // Instead, suppress canvas rendering only via draw() and computeSize().
-    // The native type (e.g. "customtext") is preserved so the Parameters tab
-    // renders a proper editable textarea.
+    // ---- Constrain the notes widget to a known height ----
+    // Without this, classic LiteGraph uses NODE_WIDGET_HEIGHT (20px) for the notes
+    // widget's layout space, but the textarea DOM element is ~42px tall, causing it
+    // to visually overflow the node boundary.  Setting computeSize and computeLayoutSize
+    // to NOTES_WIDGET_HEIGHT, and capping the element height to match, keeps both the
+    // layout and the visual within the space that computeNodeHeight allocates.
     const notesWidget = node.widgets?.find((w) => w.name === "notes");
     if (notesWidget) {
-      notesWidget.computeSize = () => [0, -4]; // zero canvas height — no space allocated
-      notesWidget.draw        = () => {};       // no-op draw — invisible on canvas
-      notesWidget.serialize   = true;           // round-trips through save/load
+      notesWidget.computeSize       = () => [node.size[0], NOTES_WIDGET_HEIGHT];
+      notesWidget.computeLayoutSize = () => ({ minHeight: NOTES_WIDGET_HEIGHT, maxHeight: NOTES_WIDGET_HEIGHT, minWidth: 0 });
+      notesWidget.serialize         = true;
+      const notesEl = notesWidget.element ?? notesWidget.inputEl;
+      if (notesEl) notesEl.style.height = `${NOTES_WIDGET_HEIGHT}px`;
     }
 
     // Build the table widget.  DOM attachment is deferred to the first
-    // onDrawForeground call (lazy mount) so the canvas container is
-    // guaranteed to exist.  See the onDrawForeground hook below.
+    // canvas draw (lazy mount in the global hook) so the canvas container is
+    // guaranteed to exist.
     const { widget, rows } = buildTableWidget(node);
-    const tableEl = widget._tableEl;
-
-    // Show/hide the table based on whether this node's graph is the active one.
-    // This covers: entering/leaving subgraphs, switching workflows, clearing.
-    //
-    // These handlers set the widget._visible FLAG rather than directly toggling
-    // display.  positionTableDOM (called every draw frame) checks _visible and
-    // skips positioning + hides the element when false.  This prevents the
-    // "ghost table" bug where positionTableDOM's unconditional display:block
-    // would override the display:none set here on the very next frame.
-
-    // graphCleared fires when "Clear Workflow" is clicked (api event).
-    const onGraphCleared = () => {
-      widget._visible = false;
-      tableEl.style.display = "none";
-    };
-    api.addEventListener("graphCleared", onGraphCleared);
-
-    // litegraph:set-graph fires on every graph transition (workflow load,
-    // entering a subgraph, returning to parent graph). The event detail
-    // contains `newGraph` — the graph that is now active.
-    //
-    // We check if THIS node is in newGraph: show if yes, hide if no.
-    // This mirrors how ComfyUI's own DOMWidgetImpl manager works:
-    //   for each widget: id in newGraph.widgets ? active=true : active=false
-    //
-    // NOTE: do NOT use "graphChanged" (server WebSocket event, not UI navigation)
-    //       or "subgraph-opening" alone (only fires on enter, not on return).
-    const syncTableVisibility = (e) => {
-      const newGraph = e?.detail?.newGraph;
-      if (!newGraph) {
-        widget._visible = false;
-        tableEl.style.display = "none";
-        return;
-      }
-      const nodeInGraph = !!(
-        newGraph._nodes?.includes(node) ||
-        newGraph.getNodeById?.(node.id)
-      );
-      widget._visible = nodeInGraph;
-      // When hidden, set display:none immediately so there's no single-frame flash.
-      // When visible, let positionTableDOM handle display:block on the next frame
-      // (it needs to compute the correct position first).
-      if (!nodeInGraph) tableEl.style.display = "none";
-    };
-    app.canvas.canvas.addEventListener("litegraph:set-graph", syncTableVisibility);
 
     // Initial sync of output slots + node size (also calls syncInfoPanelOutputs).
     syncOutputSlots(node, rows);
@@ -846,42 +1030,12 @@ app.registerExtension({
       });
     };
 
-    // ---- Draw hook: reposition DOM table each frame ----
-    const origOnDrawForeground = node.onDrawForeground?.bind(node);
-    node.onDrawForeground = function (ctx) {
-      origOnDrawForeground?.(ctx);
-
-      // Lazy DOM mount: append to #graph-canvas-container on first draw.
-      //
-      // WHY this container?  It has `overflow: clip` — the only CSS overflow
-      // mode that clips position:fixed descendants.  This prevents the GPU
-      // compositor from painting a "ghost" of our element at viewport (0,0)
-      // when transform: scale(N) with N > ~1.5.  Appending to document.body
-      // would produce this ghost.  See the architecture block at the top of
-      // this file for the full explanation.
-      //
-      // WHY lazy?  At nodeCreated time the canvas container may not exist
-      // yet.  On the first onDrawForeground call it is guaranteed mounted.
-      const tw = node.widgets?.find((w) => w.name === "_channel_table");
-      if (tw?._tableEl && !tw._tableEl.parentElement) {
-        const container = document.getElementById("graph-canvas-container")
-                          || ctx.canvas.parentElement
-                          || document.body;  // fallback (should never happen)
-        container.appendChild(tw._tableEl);
-      }
-
-      positionTableDOM(node, ctx);
-    };
-
     // ---- Cleanup on remove ----
     const origOnRemoved = node.onRemoved?.bind(node);
     node.onRemoved = function () {
       // Remove DOM element from document
       const tw = node.widgets?.find((w) => w.name === "_channel_table");
       tw?._tableEl?.remove();
-      // Remove global listeners to prevent memory leaks
-      api.removeEventListener("graphCleared", onGraphCleared);
-      app.canvas.canvas.removeEventListener("litegraph:set-graph", syncTableVisibility);
       origOnRemoved?.();
     };
   },

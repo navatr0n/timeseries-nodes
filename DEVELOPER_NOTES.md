@@ -57,7 +57,9 @@ Where polarity is +1 or -1, gain is a multiplier, and offset is additive.
 ### The Problem
 
 When the ChannelMapper node is inside a subgraph and the canvas is zoomed
-beyond ~150%, a semi-transparent "ghost" copy of the DOM table appears at
+beyond ~1
+
+50%, a semi-transparent "ghost" copy of the DOM table appears at
 the top of the viewport (position 0,0). The ghost has the same content as
 the real table, with the transparency of the container's `rgba(30,30,30,0.92)`
 background.
@@ -618,3 +620,182 @@ Open Safari's Web Inspector (Develop > Show Web Inspector):
   compositor layers. The ghost appears as a separate compositing layer at
   viewport (0,0).
 - **Console**: Log `app.canvas.ds` to see current offset/scale values.
+
+---
+
+## Node 2.0 (Vue Nodes) Integration Guide
+
+> **Read this before modifying any code that resizes nodes or updates output slots
+> when ComfyUI's "Node 2.0" renderer is active (`LiteGraph?.vueNodesMode === true`).**
+
+Node 2.0 replaces the classic LiteGraph canvas renderer with a Vue 3 component tree.
+This introduces a two-source-of-truth problem: LiteGraph's raw node objects and a
+separate Vue-managed layout store both track node geometry and output slot data.
+Code that works perfectly in classic mode can silently fail in Node 2.0 because the
+two layers get out of sync.
+
+---
+
+### Problem 1 — Node resize is reverted
+
+#### Symptom
+
+After connecting a timeseries input, the node height is not updated. The DOM table
+renders correctly but the node frame stays at its pre-connection size.
+
+#### Root Cause: `node.setSize()` does not touch the layout store
+
+In Node 2.0, node geometry is driven by a YJS-backed reactive layout store (`B`),
+not by `node.size` directly. The `useLayoutSync` composable watches the store and
+propagates changes **from store → LiteGraph** by calling `r.setSize([width, height])`.
+
+`node.setSize(e)` only mutates the underlying `Float64Array` in-place:
+
+```js
+// Simplified LiteGraph setSize:
+setSize(e) { this.size = e; this.onResize?.(this.size); }
+set size(e) { this._size[0] = e[0]; this._size[1] = e[1]; }  // in-place mutation
+```
+
+It does NOT write to the layout store. `useLayoutSync` then sees the store value
+unchanged and **reverts** `node.size` back on the next store tick.
+
+#### The Fix: use `initLayoutMutations().resizeNode()`
+
+```js
+// WRONG — gets reverted by useLayoutSync in Node 2.0:
+node.setSize([node.size[0], h]);
+
+// CORRECT — updates the layout store; useLayoutSync propagates it to LiteGraph:
+node.setSize([node.size[0], h]);  // still call for classic mode compat
+if (LiteGraph?.vueNodesMode) {
+  app.canvas.initLayoutMutations?.()?.resizeNode(node.id, { width: node.size[0], height: h });
+}
+```
+
+`app.canvas.initLayoutMutations()` is a method on `LGraphCanvas` that calls
+`useLayoutMutations()` with `setSource(Canvas)` and returns `{resizeNode, moveNode, ...}`.
+`resizeNode` applies a store operation that `useLayoutSync` will propagate back to
+LiteGraph — so both layers agree.
+
+**Important:** `node.setSize()` must still be called first (before `resizeNode`)
+because `onResize` snaps the height to the table-dictated value. The layout store
+update must happen with the already-snapped value in `node.size`.
+
+---
+
+### Problem 2 — Output slots do not update after `addOutput()`
+
+#### Symptom
+
+After connecting a timeseries input, the node's CHANNEL output slots are not
+created or renamed. The slots appear correctly in classic mode but stay as the
+static `/object_info` default in Node 2.0.
+
+#### Root Cause: `extractVueNodeData()` takes a plain static snapshot of `node.outputs`
+
+`handleNodeAdded()` (called once when a node is first added) calls
+`extractVueNodeData(node)`, which stores a snapshot of the node's data in a
+`shallowReactive(Map)` keyed by node ID. The Vue component renders output slots
+from this snapshot.
+
+Critically, `outputs` is snapshotted as a plain array copy — NOT wrapped in a
+reactive proxy:
+
+```js
+// extractVueNodeData (simplified from bundle):
+{
+  inputs:  _e([...e.inputs]),   // _e() = reactive wrapper → live
+  outputs: [...e.outputs],      // plain array copy → STATIC snapshot
+  widgets: _e([...e.widgets]),  // reactive wrapper → live
+}
+```
+
+When `node.addOutput()` / `node.removeOutput()` modifies the raw LiteGraph
+`node.outputs` array, Vue never sees the change — the snapshot is stale.
+
+#### The Fix: re-fire `app.graph.onNodeAdded(node)`
+
+`onNodeAdded` triggers `handleNodeAdded`, which:
+1. Calls `extractVueNodeData(node)` → re-snapshots the current `node.outputs` into
+   the reactive Map (fixing the stale data).
+2. Calls `initializeVueNodeLayout(node)` → re-seeds the layout store from
+   `node.size` (fixing the size if `setSize` was called just before).
+
+Call it **after** `syncOutputSlots` has already modified `node.outputs` and set
+the correct `node.size`:
+
+```js
+// setColumns(), after syncOutputSlots():
+if (LiteGraph?.vueNodesMode) {
+  node._cmVueRefresh = true;
+  try {
+    app.graph?.onNodeAdded?.(node);
+  } finally {
+    node._cmVueRefresh = false;
+  }
+}
+```
+
+#### The `_cmVueRefresh` flag
+
+`onNodeAdded` fires all registered `nodeCreated` extension hooks, including our
+own `buildTableWidget`. Without a guard, `buildTableWidget` would tear down and
+reconstruct the DOM table on every connection — wasteful and potentially lossy.
+
+The `_cmVueRefresh` flag tells `buildTableWidget` to skip DOM reconstruction and
+return the existing widget immediately:
+
+```js
+function buildTableWidget(node) {
+  if (node._cmVueRefresh) {
+    const existingW = node.widgets?.find((w) => w.name === "_channel_table");
+    return { widget: existingW, rows: existingW?._rows ?? [] };
+  }
+  // ... normal DOM build path
+}
+```
+
+The flag is synchronous (set before, cleared in `finally`), so it's never visible
+to asynchronous code and doesn't need cleanup beyond the `try/finally`.
+
+---
+
+### Misconception: `litegraph:set-graph` does NOT fire from `setSize()`
+
+An earlier comment in the code claimed:
+> "litegraph:set-graph fires spuriously during setSize()"
+
+This is **incorrect**. Bundle analysis of `api-*.js` confirms that
+`litegraph:set-graph` is dispatched in exactly two places:
+- `canvas.setGraph(graph)` — switches the active graph
+- `canvas.openSubgraph(subgraph)` — enters a subgraph
+
+It is NOT dispatched by `node.setSize()`, `node.addOutput()`, or any other
+node-level mutation. The `requestAnimationFrame` workaround that was based on
+this misconception had no effect and has been removed.
+
+---
+
+### Node 2.0 Architecture Summary
+
+| Layer | Source of truth | Updated by |
+|-------|----------------|------------|
+| Geometry (size/pos) | YJS layout store (`B`) | `initLayoutMutations().resizeNode()` |
+| Output slot data | `shallowReactive(Map)` snapshot | `onNodeAdded(node)` → `extractVueNodeData` |
+| LiteGraph `node.size` | Float64Array subarray | `useLayoutSync` (store → LG direction) |
+| LiteGraph `node.outputs` | Raw JS array | `node.addOutput()` / `node.removeOutput()` |
+
+The key architectural constraint: **changes must flow through the Vue layer, not
+around it**. Direct mutations to `node.size` or `node.outputs` are authoritative in
+classic mode but are shadows in Node 2.0 — the Vue layer holds the canonical values
+and actively overwrites direct mutations.
+
+### Node 2.0: failed approaches
+
+| Approach | Why it failed |
+|----------|---------------|
+| `node.setSize([w, h])` alone | `useLayoutSync` reverts it on next store tick |
+| `requestAnimationFrame(() => node.setSize(...))` | Same revert mechanism; timing doesn't help |
+| Mutating `node.outputs` directly | Snapshot in `shallowReactive(Map)` is never refreshed |
+| `store.addNodeDef()` for slot rendering | Updates the Info panel (nodeDef store) only, not the canvas output slots (nodeData store) |
