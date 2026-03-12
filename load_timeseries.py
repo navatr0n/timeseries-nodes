@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 
+import numpy as np
 import folder_paths
 
 from .common import (
@@ -84,6 +85,17 @@ class LoadTimeseries:
         time_array = data.get(time_col) if time_col else None
         sample_rate = _infer_sample_rate(time_array) if time_array is not None else None
 
+        data_min: dict = {}
+        data_max: dict = {}
+        for col, arr in data.items():
+            finite = arr[np.isfinite(arr)]
+            if len(finite) > 0:
+                data_min[col] = float(np.min(finite))
+                data_max[col] = float(np.max(finite))
+            else:
+                data_min[col] = float("nan")
+                data_max[col] = float("nan")
+
         timeseries: TimeseriesDict = {
             "data": data,
             "channels": columns,
@@ -91,6 +103,8 @@ class LoadTimeseries:
             "sample_rate": sample_rate,
             "time": time_array,
             "source_file": os.path.basename(file),
+            "data_min": data_min,
+            "data_max": data_max,
         }
         return (timeseries,)
 

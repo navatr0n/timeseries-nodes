@@ -6,6 +6,7 @@ Nodes
 LoadTimeseries  -- Load a CSV file and output a TIMESERIES dict.
 ChannelMapper   -- Map CSV columns into named, scaled CHANNEL outputs.
 ChannelXYPlot   -- Plot two CHANNEL signals as an XY chart (IMAGE output). Display name: XY-Plotter-Simple.
+ChannelBundle   -- Bundle multiple CHANNEL signals into a TIMESERIES (like MATLAB Mux/Bus Creator).
 
 Dependencies:
   - numpy      (required, already in ComfyUI requirements.txt)
@@ -30,6 +31,7 @@ File layout
 from .load_timeseries import LoadTimeseries
 from .channel_mapper  import ChannelMapper
 from .channel_xy_plot import ChannelXYPlot
+from .channel_bundle  import ChannelBundle
 
 # ---------------------------------------------------------------------------
 # ComfyUI plugin registration
@@ -39,12 +41,14 @@ NODE_CLASS_MAPPINGS = {
     "LoadTimeseries": LoadTimeseries,
     "ChannelMapper":  ChannelMapper,
     "ChannelXYPlot":  ChannelXYPlot,
+    "ChannelBundle":  ChannelBundle,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadTimeseries": "Load Timeseries",
     "ChannelMapper":  "Channel Mapper",
     "ChannelXYPlot":  "XY-Plotter-Simple",
+    "ChannelBundle":  "Channel Bundle",
 }
 
 # JS extensions are served from the ./js directory.
@@ -75,3 +79,5 @@ async def get_timeseries_columns(request: web.Request) -> web.Response:
         return web.json_response({"channels": columns, "units": [""] * len(columns)})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
+
+

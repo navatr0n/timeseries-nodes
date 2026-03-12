@@ -56,6 +56,12 @@ class ChannelXYPlot:
                 "plot_type": (["line", "scatter"],),
                 "title":    ("STRING", {"default": "", "multiline": False}),
                 "subtitle": ("STRING", {"default": "", "multiline": False}),
+                "x_range_mode": (["auto", "manual"],),
+                "x_min": ("FLOAT", {"default": 0.0, "step": 0.001}),
+                "x_max": ("FLOAT", {"default": 1.0, "step": 0.001}),
+                "y_range_mode": (["auto", "manual"],),
+                "y_min": ("FLOAT", {"default": 0.0, "step": 0.001}),
+                "y_max": ("FLOAT", {"default": 1.0, "step": 0.001}),
                 "width":  ("INT", {"default": 800, "min": 100, "max": 4096, "step": 1}),
                 "height": ("INT", {"default": 600, "min": 100, "max": 4096, "step": 1}),
                 "dpi":    ("INT", {"default": 100, "min": 50,  "max": 300,  "step": 1}),
@@ -73,7 +79,10 @@ class ChannelXYPlot:
     )
     SEARCH_ALIASES = ["plot", "xy plot", "chart", "graph", "visualize", "signal"]
 
-    def plot(self, x_channel, y_channel, plot_type: str, title: str, subtitle: str, width: int, height: int, dpi: int):
+    def plot(self, x_channel, y_channel, plot_type: str, title: str, subtitle: str,
+             x_range_mode: str, x_min: float, x_max: float,
+             y_range_mode: str, y_min: float, y_max: float,
+             width: int, height: int, dpi: int):
         if not _MATPLOTLIB_AVAILABLE:
             raise RuntimeError(
                 "ChannelXYPlot requires matplotlib. "
@@ -112,6 +121,21 @@ class ChannelXYPlot:
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.grid(True, alpha=0.3)
+
+        # Apply manual axis ranges
+        if x_range_mode == "manual":
+            if x_min >= x_max:
+                raise ValueError(
+                    f"XY-Plotter: x_min ({x_min}) must be less than x_max ({x_max})"
+                )
+            ax.set_xlim(x_min, x_max)
+        if y_range_mode == "manual":
+            if y_min >= y_max:
+                raise ValueError(
+                    f"XY-Plotter: y_min ({y_min}) must be less than y_max ({y_max})"
+                )
+            ax.set_ylim(y_min, y_max)
+
         if title and subtitle:
             # fig.suptitle occupies the figure-level title row; ax.set_title sits
             # just above the axes — together they render as a stacked title/subtitle.
@@ -140,4 +164,17 @@ class ChannelXYPlot:
         arr     = np.array(pil_img).astype(np.float32) / 255.0  # (H, W, 3), range [0, 1]
         tensor  = torch.from_numpy(arr)[None,]                   # (1, H, W, 3)
 
-        return (tensor,)
+        # Prefer pre-computed range from the CHANNEL dict; fall back to scanning the
+        # (possibly truncated) x_data / y_data arrays if the field is missing.
+        x_min_val = x_channel.get("data_min", float(np.min(x_data)))
+        x_max_val = x_channel.get("data_max", float(np.max(x_data)))
+        y_min_val = y_channel.get("data_min", float(np.min(y_data)))
+        y_max_val = y_channel.get("data_max", float(np.max(y_data)))
+
+        return {
+            "ui": {
+                "x_data_range": [x_min_val, x_max_val],
+                "y_data_range": [y_min_val, y_max_val],
+            },
+            "result": (tensor,),
+        }

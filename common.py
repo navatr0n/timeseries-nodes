@@ -33,6 +33,8 @@ class TimeseriesDict(TypedDict):
     sample_rate: float | None  # samples/sec if detected from time column, else None
     time: np.ndarray | None    # time axis values, or None
     source_file: str           # original filename (basename only)
+    data_min: dict            # channel_name -> float min of raw column (populated by LoadTimeseries)
+    data_max: dict            # channel_name -> float max of raw column (populated by LoadTimeseries)
 
 
 class ChannelDict(TypedDict):
@@ -43,6 +45,8 @@ class ChannelDict(TypedDict):
     name: str                 # user-assigned display name
     units: str                # engineering unit label of the signal (target unit)
     sample_rate: float | None
+    data_min: float           # min of the transformed data array
+    data_max: float           # max of the transformed data array
 
 
 # ---------------------------------------------------------------------------

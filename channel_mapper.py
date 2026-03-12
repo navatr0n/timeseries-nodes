@@ -144,6 +144,10 @@ class ChannelMapper:
             arr = ts_data[source_col].copy().astype(np.float64)
             arr = polarity * gain * arr + offset
 
+            finite = arr[np.isfinite(arr)]
+            ch_min = float(np.min(finite)) if len(finite) > 0 else float("nan")
+            ch_max = float(np.max(finite)) if len(finite) > 0 else float("nan")
+
             channel: ChannelDict = {
                 "data":        arr,
                 "source_file": timeseries.get("source_file", ""),
@@ -151,6 +155,8 @@ class ChannelMapper:
                 "name":        name,
                 "units":       unit,
                 "sample_rate": ts_sr,
+                "data_min":    ch_min,
+                "data_max":    ch_max,
             }
             results.append(channel)
 
