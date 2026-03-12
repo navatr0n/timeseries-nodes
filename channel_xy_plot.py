@@ -54,6 +54,8 @@ class ChannelXYPlot:
                 "x_channel": ("CHANNEL",),
                 "y_channel": ("CHANNEL",),
                 "plot_type": (["line", "scatter"],),
+                "title":    ("STRING", {"default": "", "multiline": False}),
+                "subtitle": ("STRING", {"default": "", "multiline": False}),
                 "width":  ("INT", {"default": 800, "min": 100, "max": 4096, "step": 1}),
                 "height": ("INT", {"default": 600, "min": 100, "max": 4096, "step": 1}),
                 "dpi":    ("INT", {"default": 100, "min": 50,  "max": 300,  "step": 1}),
@@ -71,7 +73,7 @@ class ChannelXYPlot:
     )
     SEARCH_ALIASES = ["plot", "xy plot", "chart", "graph", "visualize", "signal"]
 
-    def plot(self, x_channel, y_channel, plot_type: str, width: int, height: int, dpi: int):
+    def plot(self, x_channel, y_channel, plot_type: str, title: str, subtitle: str, width: int, height: int, dpi: int):
         if not _MATPLOTLIB_AVAILABLE:
             raise RuntimeError(
                 "ChannelXYPlot requires matplotlib. "
@@ -110,6 +112,15 @@ class ChannelXYPlot:
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.grid(True, alpha=0.3)
+        if title and subtitle:
+            # fig.suptitle occupies the figure-level title row; ax.set_title sits
+            # just above the axes — together they render as a stacked title/subtitle.
+            fig.suptitle(title, fontsize=13, fontweight="bold")
+            ax.set_title(subtitle, fontsize=9, color="gray")
+        elif title:
+            ax.set_title(title, fontsize=13, fontweight="bold")
+        elif subtitle:
+            ax.set_title(subtitle, fontsize=10, color="gray")
         fig.tight_layout()
         if source_note:
             fig.text(
