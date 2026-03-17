@@ -79,6 +79,9 @@ class ChannelBundle:
             channels.append(unique_name)
             units.append(ch.get("units", ""))
 
+        data_min = {name: float(np.min(arr[np.isfinite(arr)])) if np.any(np.isfinite(arr)) else float("nan") for name, arr in data.items()}
+        data_max = {name: float(np.max(arr[np.isfinite(arr)])) if np.any(np.isfinite(arr)) else float("nan") for name, arr in data.items()}
+
         timeseries: TimeseriesDict = {
             "data":        data,
             "channels":    channels,
@@ -86,6 +89,9 @@ class ChannelBundle:
             "sample_rate": None,   # mixed origins — no single rate is meaningful
             "time":        None,
             "source_file": "",
+            "data_min":    data_min,
+            "data_max":    data_max,
+            "metadata":    [],
         }
 
         return (timeseries,)

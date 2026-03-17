@@ -35,6 +35,7 @@ class TimeseriesDict(TypedDict):
     source_file: str           # original filename (basename only)
     data_min: dict            # channel_name -> float min of raw column (populated by LoadTimeseries)
     data_max: dict            # channel_name -> float max of raw column (populated by LoadTimeseries)
+    metadata: list            # list of (variable_name, value) tuples; [] if none
 
 
 class ChannelDict(TypedDict):

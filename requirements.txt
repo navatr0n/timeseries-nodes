@@ -1,0 +1,8 @@
+# Required
+h5py
+
+# Optional — improves CSV parsing (auto-detects separators, mixed types)
+# pandas
+
+# Optional — required for ChannelXYPlot node
+# matplotlib

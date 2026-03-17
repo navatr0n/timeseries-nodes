@@ -108,6 +108,7 @@ class LoadTimeseries:
             "source_file": os.path.basename(file),
             "data_min": data_min,
             "data_max": data_max,
+            "metadata": [],
         }
         return (timeseries,)
 

@@ -12,6 +12,7 @@ Dependencies:
   - numpy      (required, already in ComfyUI requirements.txt)
   - torch      (required, already in ComfyUI requirements.txt)
   - Pillow     (required, already in ComfyUI requirements.txt)
+  - h5py       (required for SaveHDF5; pip install h5py)
   - pandas     (optional, improves CSV parsing;  pip install pandas)
   - matplotlib (optional, required for ChannelXYPlot; pip install matplotlib)
 
@@ -32,6 +33,8 @@ from .load_timeseries import LoadTimeseries
 from .channel_mapper  import ChannelMapper
 from .channel_xy_plot import ChannelXYPlot
 from .channel_bundle  import ChannelBundle
+from .attach_metadata import AttachMetadata
+from .save_hdf5       import SaveHDF5
 
 # ---------------------------------------------------------------------------
 # ComfyUI plugin registration
@@ -42,6 +45,8 @@ NODE_CLASS_MAPPINGS = {
     "ChannelMapper":  ChannelMapper,
     "ChannelXYPlot":  ChannelXYPlot,
     "ChannelBundle":  ChannelBundle,
+    "AttachMetadata": AttachMetadata,
+    "SaveHDF5":       SaveHDF5,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -49,6 +54,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ChannelMapper":  "Channel Mapper (editor)",
     "ChannelXYPlot":  "XY-Plotter-Simple",
     "ChannelBundle":  "Channel Bundle",
+    "AttachMetadata": "Attach Metadata",
+    "SaveHDF5":       "Save HDF5",
 }
 
 # JS extensions are served from the ./js directory.
