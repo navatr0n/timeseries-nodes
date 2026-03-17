@@ -1068,6 +1068,27 @@ app.registerExtension({
       origOnRemoved?.();
     };
   },
+
+  /**
+   * Rebuild the table after workflow load.
+   *
+   * WHY: nodeCreated fires before configure() restores saved widget values,
+   * so buildTableWidget reads channel_mapping while it still holds its
+   * default "[]" — resulting in a blank table on every reload.
+   * loadedGraphNode fires after configure(), so channel_mapping already
+   * contains the saved JSON at this point.
+   */
+  loadedGraphNode(node) {
+    if (node.comfyClass !== "ChannelMapper") return;
+
+    // Remove the stale DOM element built during nodeCreated (empty rows).
+    const stale = node.widgets?.find((w) => w.name === "_channel_table");
+    if (stale?._tableEl) stale._tableEl.remove();
+
+    // Rebuild from the now-restored channel_mapping value.
+    const { widget, rows } = buildTableWidget(node);
+    syncOutputSlots(node, rows);
+  },
 });
 
 // ---------------------------------------------------------------------------
