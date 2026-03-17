@@ -1,0 +1,119 @@
+"""
+timeseries_list_bundle.py — TimeseriesListBundle node.
+
+Bundles multiple TIMESERIES inputs into a LIST of TIMESERIES.
+
+Only channels present in ALL inputs are kept (intersection). The reference
+input determines the channel order and is user-selectable via a dropdown;
+it defaults to the first connected slot ("timeseries_1").
+
+Each output TIMESERIES retains its own time, sample_rate, source_file,
+metadata, data_min, and data_max (filtered to the common channel set).
+
+Omitted channels (present in some but not all inputs) are returned as a
+LIST of strings for debugging.
+"""
+from __future__ import annotations
+
+import re
+
+from .common import TimeseriesDict
+
+
+def _slot_order(key: str) -> int:
+    """Sort key: extract trailing integer from slot name (e.g. 'timeseries_3' → 3)."""
+    m = re.search(r"(\d+)$", key)
+    return int(m.group(1)) if m else 0
+
+
+class TimeseriesListBundle:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                # Stores the user-selected reference slot name.
+                # The JS hides this widget and replaces it with a live combo.
+                "reference": ("STRING", {"default": "timeseries_1"}),
+            },
+        }
+
+    RETURN_TYPES  = ("LIST", "LIST")
+    RETURN_NAMES  = ("timeseries_list", "omitted_channels")
+    FUNCTION      = "bundle"
+    CATEGORY      = "timeseries"
+    DESCRIPTION   = (
+        "Bundle multiple TIMESERIES inputs into a LIST. "
+        "Only channels present in ALL inputs are kept. "
+        "The reference input determines channel order. "
+        "Omitted channels (not in all inputs) are returned as a LIST of strings."
+    )
+    SEARCH_ALIASES = ["bundle", "list", "merge", "stack", "combine"]
+
+    def bundle(self, reference: str = "timeseries_1", **kwargs) -> tuple:
+        # Collect all TIMESERIES inputs from dynamic slots.
+        ts_inputs: dict[str, TimeseriesDict] = {
+            k: v for k, v in kwargs.items()
+            if isinstance(v, dict) and "channels" in v
+        }
+
+        if not ts_inputs:
+            raise ValueError(
+                "TimeseriesListBundle: at least one TIMESERIES input must be connected."
+            )
+
+        # Ordered list by slot number (timeseries_1 first).
+        sorted_keys = sorted(ts_inputs.keys(), key=_slot_order)
+        ordered_ts  = [ts_inputs[k] for k in sorted_keys]
+
+        # Resolve reference — fall back to first connected input if not found.
+        ref_ts       = ts_inputs.get(reference) or ordered_ts[0]
+        ref_channels: list[str] = ref_ts.get("channels") or []
+
+        # Intersect channel sets across all inputs.
+        common: set[str] = set(ref_channels)
+        for ts in ordered_ts:
+            common &= set(ts.get("channels") or [])
+
+        # Final channel list: reference order, filtered to common channels.
+        final_channels = [ch for ch in ref_channels if ch in common]
+
+        if not final_channels:
+            raise ValueError(
+                "TimeseriesListBundle: no channels are shared across all inputs. "
+                "Check that all connected TIMESERIES contain at least one common channel."
+            )
+
+        # Omitted: in any input but not in all.
+        all_channels: set[str] = set()
+        for ts in ordered_ts:
+            all_channels |= set(ts.get("channels") or [])
+        omitted: list[str] = sorted(all_channels - common)
+
+        # Build filtered TIMESERIES list.
+        result: list[TimeseriesDict] = []
+        for ts in ordered_ts:
+            ts_channels: list[str] = ts.get("channels") or []
+            ts_units:    list[str] = ts.get("units") or [""] * len(ts_channels)
+            units_map = dict(zip(ts_channels, ts_units))
+
+            src_min: dict = ts.get("data_min") or {}
+            src_max: dict = ts.get("data_max") or {}
+            src_data: dict = ts.get("data") or {}
+
+            new_data     = {ch: src_data[ch] for ch in final_channels if ch in src_data}
+            new_units    = [units_map.get(ch, "") for ch in final_channels]
+            new_data_min = {ch: src_min.get(ch, float("nan")) for ch in final_channels}
+            new_data_max = {ch: src_max.get(ch, float("nan")) for ch in final_channels}
+
+            filtered: TimeseriesDict = {
+                **ts,
+                "data":     new_data,
+                "channels": final_channels,
+                "units":    new_units,
+                "data_min": new_data_min,
+                "data_max": new_data_max,
+            }
+            result.append(filtered)
+
+        return (result, omitted)

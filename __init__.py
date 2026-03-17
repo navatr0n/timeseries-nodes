@@ -29,33 +29,36 @@ File layout
   __init__.py         This file — thin entry point for ComfyUI plugin discovery
 """
 
-from .load_timeseries import LoadTimeseries
-from .channel_mapper  import ChannelMapper
-from .channel_xy_plot import ChannelXYPlot
-from .channel_bundle  import ChannelBundle
-from .attach_metadata import AttachMetadata
-from .save_hdf5       import SaveHDF5
+from .load_timeseries        import LoadTimeseries
+from .channel_mapper         import ChannelMapper
+from .channel_xy_plot        import ChannelXYPlot
+from .channel_bundle         import ChannelBundle
+from .attach_metadata        import AttachMetadata
+from .save_hdf5              import SaveHDF5
+from .timeseries_list_bundle import TimeseriesListBundle
 
 # ---------------------------------------------------------------------------
 # ComfyUI plugin registration
 # ---------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
-    "LoadTimeseries": LoadTimeseries,
-    "ChannelMapper":  ChannelMapper,
-    "ChannelXYPlot":  ChannelXYPlot,
-    "ChannelBundle":  ChannelBundle,
-    "AttachMetadata": AttachMetadata,
-    "SaveHDF5":       SaveHDF5,
+    "LoadTimeseries":        LoadTimeseries,
+    "ChannelMapper":         ChannelMapper,
+    "ChannelXYPlot":         ChannelXYPlot,
+    "ChannelBundle":         ChannelBundle,
+    "AttachMetadata":        AttachMetadata,
+    "SaveHDF5":              SaveHDF5,
+    "TimeseriesListBundle":  TimeseriesListBundle,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadTimeseries": "Load Timeseries",
-    "ChannelMapper":  "Channel Mapper (editor)",
-    "ChannelXYPlot":  "XY-Plotter-Simple",
-    "ChannelBundle":  "Channel Bundle",
-    "AttachMetadata": "Attach Metadata",
-    "SaveHDF5":       "Save HDF5",
+    "LoadTimeseries":        "Load Timeseries",
+    "ChannelMapper":         "Channel Mapper (editor)",
+    "ChannelXYPlot":         "XY-Plotter-Simple",
+    "ChannelBundle":         "Channel Bundle",
+    "AttachMetadata":        "Attach Metadata",
+    "SaveHDF5":              "Save HDF5",
+    "TimeseriesListBundle":  "Timeseries Bundle",
 }
 
 # JS extensions are served from the ./js directory.
