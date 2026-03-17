@@ -32,6 +32,12 @@ class TimeseriesListBundle:
         return {
             "required": {},
             "optional": {
+                # Static placeholder so ComfyUI's type-matching includes this
+                # node when dragging a TIMESERIES wire (suggestion list).
+                # The JS manages all TIMESERIES slots dynamically; this entry
+                # seeds slot 1 on node creation so nodeCreated's tsInputs()
+                # check finds it and skips adding a duplicate.
+                "timeseries_1": ("TIMESERIES",),
                 # Stores the user-selected reference slot name.
                 # The JS hides this widget and replaces it with a live combo.
                 "reference": ("STRING", {"default": "timeseries_1"}),

@@ -33,9 +33,17 @@ class ChannelBundle:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # No static inputs — all CHANNEL slots are added dynamically by JS.
-        # ComfyUI still needs at least one entry so the node registers cleanly.
-        return {"required": {}, "optional": {}}
+        return {
+            "required": {},
+            "optional": {
+                # Static placeholder so ComfyUI's type-matching includes this
+                # node when dragging a CHANNEL wire (suggestion list).
+                # The JS manages all CHANNEL slots dynamically; this entry
+                # seeds slot 1 so the nodeCreated guard (!node.inputs?.length)
+                # finds it and skips adding a duplicate.
+                "channel_1": ("CHANNEL",),
+            },
+        }
 
     RETURN_TYPES   = ("TIMESERIES",)
     RETURN_NAMES   = ("timeseries",)
