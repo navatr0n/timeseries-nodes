@@ -190,15 +190,16 @@ function syncInfoPanelOutputs(node, rows) {
 
   // Build V1-format arrays that ComfyNodeDefImpl's constructor reads from
   // (it calls transformNodeDefV1ToV2 internally to build the V2 .outputs array).
-  // Output 0 is always the annotated TIMESERIES; outputs 1..N are CHANNELs.
-  const channelNames = rows.length > 0
-    ? rows.map((row, i) => row.name || row.source || `channel_${i}`)
+  // Output 0 is always the annotated TIMESERIES; outputs 1..N are enabled CHANNELs.
+  const enabledRows  = rows.filter(r => r.enabled !== false);
+  const channelNames = enabledRows.length > 0
+    ? enabledRows.map((row, i) => row.name || row.source || `channel_${i}`)
     : ['channel_0'];
   const names    = ['timeseries', ...channelNames];
   const types    = ['TIMESERIES', ...channelNames.map(() => 'CHANNEL')];
   const isList   = names.map(() => false);
-  const tooltips = ['', ...(rows.length > 0
-    ? rows.map((row) => row.source_unit ? `[${row.source_unit}]` : '')
+  const tooltips = ['', ...(enabledRows.length > 0
+    ? enabledRows.map((row) => row.source_unit ? `[${row.source_unit}]` : '')
     : [''])];
 
   // Re-register with updated V1 output fields.
@@ -228,6 +229,7 @@ function defaultRow(sourceCol) {
     unit:        "",
     gain:        1.0,
     offset:      0.0,
+    enabled:     false,
   };
 }
 
@@ -265,17 +267,20 @@ function saveMappingToWidget(node, rows) {
  * spurious auto-resize. The extra offset comes from slot position math
  * (i+0.7 factor → +4px), the start margin (+2px), and the inter-widget gap (+4px).
  */
-function computeNodeHeight(rowCount) {
-  const N = Math.max(rowCount, 1);
+// rowCount  — total rows in the table (drives table visual height)
+// enabledCount — rows with enabled=true (drives output slot area height)
+function computeNodeHeight(rowCount, enabledCount = rowCount) {
+  const N = Math.max(enabledCount, 1);
   const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT + TABLE_FOOTER_SAFETY_PX;
   // +1 accounts for the fixed TIMESERIES output slot at index 0.
   const slotAreaHeight = (N + 1) * LG_SLOT_HEIGHT;
   return Math.max(tableHeight, slotAreaHeight) + NOTES_WIDGET_HEIGHT + LG_NODE_PADDING;
 }
 
-/** Sync output slots to match the current mapping rows and resize the node. */
+/** Sync output slots to match the current enabled mapping rows and resize the node. */
 function syncOutputSlots(node, rows) {
-  const channelCount = rows.length || 1; // always keep at least 1 CHANNEL slot
+  const enabledRows  = rows.filter(r => r.enabled !== false);
+  const channelCount = enabledRows.length || 1; // always keep at least 1 CHANNEL slot
   const totalDesired = channelCount + 1; // +1 for the TIMESERIES slot at index 0
 
   // Ensure output[0] is always the annotated TIMESERIES output.
@@ -299,12 +304,12 @@ function syncOutputSlots(node, rows) {
     node.removeOutput(node.outputs.length - 1);
   }
 
-  // Rename CHANNEL slots to match the user-assigned channel names.
+  // Rename CHANNEL slots to match enabled row names.
   // CHANNEL outputs start at index 1 (index 0 is always TIMESERIES).
   // Must write BOTH name and localized_name: LiteGraph renders
   // `label || localized_name || name`, and ComfyUI's addOutputs() sets
   // localized_name before nodeCreated fires.
-  rows.forEach((row, i) => {
+  enabledRows.forEach((row, i) => {
     const outIdx = i + 1; // offset by 1 for the TIMESERIES slot
     if (node.outputs[outIdx]) {
       const label = row.name || row.source || `channel_${i}`;
@@ -315,7 +320,7 @@ function syncOutputSlots(node, rows) {
 
   // Enforce correct height but preserve the user's current width.
   // Never clamp width upward — that prevents the user from shrinking the node.
-  const h = computeNodeHeight(rows.length);
+  const h = computeNodeHeight(rows.length, enabledRows.length);
   node.setSize([node.size[0], h]);
 
   // Node 2.0: node.setSize() mutates the LiteGraph Float64Array in-place but does
@@ -408,8 +413,8 @@ function buildTableWidget(node) {
   table.style.cssText = "border-collapse: collapse; width: 100%; table-layout: fixed;";
 
   // Column widths as % of table width (must sum to ~100%).
-  // Source | Name | Pol | SrcUnit | TgtUnit | Gain | Offset | ✕
-  const colWidths = ["18%", "20%", "8%", "10%", "10%", "10%", "10%", "4%"];
+  // On | Source | Name | Pol | SrcUnit | TgtUnit | Gain | Offset | ✕
+  const colWidths = ["5%", "15%", "17%", "7%", "9%", "9%", "9%", "9%", "4%"];
   const colgroup = document.createElement("colgroup");
   colWidths.forEach((w) => {
     const col = document.createElement("col");
@@ -421,7 +426,7 @@ function buildTableWidget(node) {
   // Header row
   const thead = table.createTHead();
   const hrow = thead.insertRow();
-  const headers = ["Source", "Name", "Pol", "Source Units", "Target Units", "Gain", "Offset", ""];
+  const headers = ["On", "Source", "Name", "Pol", "Source Units", "Target Units", "Gain", "Offset", ""];
   headers.forEach((h) => {
     const th = document.createElement("th");
     th.textContent = h;
@@ -585,6 +590,24 @@ function buildTableWidget(node) {
     tr.style.borderBottom = "1px solid #333";
     tr._rowData = rowData;
 
+    // Enabled checkbox — default off for new rows; old rows without the field default to on.
+    const isEnabled = rowData.enabled !== false;
+    tr.style.opacity = isEnabled ? "1" : "0.4";
+    const checkTd = tr.insertCell();
+    checkTd.style.cssText = "padding: 2px 3px; text-align: center;";
+    const checkbox = document.createElement("input");
+    checkbox.type    = "checkbox";
+    checkbox.checked = isEnabled;
+    checkbox.style.cssText = "cursor: pointer; pointer-events: auto; width: 14px; height: 14px;";
+    checkbox.addEventListener("change", () => {
+      rowData.enabled = checkbox.checked;
+      tr.style.opacity = checkbox.checked ? "1" : "0.4";
+      saveMappingToWidget(node, rows);
+      syncOutputSlots(node, rows);
+      app.graph?.setDirtyCanvas(true);
+    });
+    checkTd.appendChild(checkbox);
+
     const cells = [
       { el: cellInput(rowData.source,      "100%"),  key: "source"      },
       { el: cellInput(rowData.name,        "100%"),  key: "name"        },
@@ -611,13 +634,16 @@ function buildTableWidget(node) {
       });
       el.addEventListener("input", () => {
         if (key === "name") {
-          const rowIdx = rows.indexOf(rowData);
-          const outIdx = rowIdx + 1; // +1 because output[0] is the TIMESERIES slot
+          // Slot index is position among enabled rows only (+1 for TIMESERIES at slot 0).
+          const enabledRows = rows.filter(r => r.enabled !== false);
+          const enabledIdx  = enabledRows.indexOf(rowData);
+          if (enabledIdx < 0) return; // row is disabled — no output slot to update
+          const outIdx = enabledIdx + 1;
           if (node.outputs[outIdx]) {
             // Write both name and localized_name — LiteGraph renders
             // `label || localized_name || name`, so updating only name
             // leaves the stale localized_name ("channel_0") as the winner.
-            const label = el.value || rowData.source || `channel_${rowIdx}`;
+            const label = el.value || rowData.source || `channel_${enabledIdx}`;
             node.outputs[outIdx].name = label;
             node.outputs[outIdx].localized_name = label;
             node.setDirtyCanvas(true);
@@ -694,8 +720,8 @@ function buildTableWidget(node) {
     //   Classic:  tH + 20 - (slotAreaH + 6) - 4  =  tH - slotAreaH + 10
     //   Node 2.0: tH + 20 - (titleH + slotAreaH + 6) - 4  =  tH - slotAreaH - 20
     computeSize: () => {
-      const channelCount = rows.length || 1;
-      const effectiveSlotAreaH = (channelCount + 1) * LG_SLOT_HEIGHT;
+      const enabledCount   = rows.filter(r => r.enabled !== false).length || 1;
+      const effectiveSlotAreaH = (enabledCount + 1) * LG_SLOT_HEIGHT;
       const tH = tableContentHeight();
       const offset = LiteGraph?.vueNodesMode ? -80 : 15;
       return [node.size[0], Math.max(Math.max(tH, effectiveSlotAreaH) - effectiveSlotAreaH + offset, 0)];
@@ -994,9 +1020,10 @@ app.registerExtension({
     // when the user drags to resize. Return NODE_MIN_WIDTH so the user can
     // drag width freely above that, and always enforce the exact required height.
     node.computeSize = function () {
-      const tableWidget = this.widgets?.find((w) => w.name === "_channel_table");
-      const rowCount = tableWidget?._rows?.length ?? 0;
-      const h = computeNodeHeight(rowCount);
+      const tableWidget  = this.widgets?.find((w) => w.name === "_channel_table");
+      const rowCount     = tableWidget?._rows?.length ?? 0;
+      const enabledCount = tableWidget?._rows?.filter(r => r.enabled !== false).length ?? 0;
+      const h = computeNodeHeight(rowCount, enabledCount);
       return [NODE_MIN_WIDTH, h];
     };
 
@@ -1006,9 +1033,10 @@ app.registerExtension({
     // `size` is the same reference as `this.size`, mutating size[1] here
     // directly writes back to the node's actual size.
     node.onResize = function (size) {
-      const tw = this.widgets?.find((w) => w.name === "_channel_table");
-      const rowCount = tw?._rows?.length ?? 0;
-      size[1] = computeNodeHeight(rowCount);
+      const tw           = this.widgets?.find((w) => w.name === "_channel_table");
+      const rowCount     = tw?._rows?.length ?? 0;
+      const enabledCount = tw?._rows?.filter(r => r.enabled !== false).length ?? 0;
+      size[1] = computeNodeHeight(rowCount, enabledCount);
     };
 
     // ---- Watch for TIMESERIES connections ----

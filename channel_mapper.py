@@ -114,15 +114,16 @@ class ChannelMapper:
 
     def map_channels(self, timeseries: TimeseriesDict, channel_mapping: str, notes: str = ""):
         # notes is metadata only — not used in computation
-        ts_data: dict     = timeseries["data"]
+        ts_data: dict       = timeseries["data"]
         ts_sr: float | None = timeseries["sample_rate"]
-        ts_channels: list = timeseries.get("channels", [])
-        ts_units: list    = timeseries.get("units", [""] * len(ts_channels))
 
-        rows = _parse_channel_mapping(channel_mapping)
+        all_rows = _parse_channel_mapping(channel_mapping)
+        # Backwards compat: rows without 'enabled' field default to enabled=True.
+        # New rows set enabled=False by the JS frontend; old saved mappings omit the
+        # field entirely and must continue to behave as fully enabled.
+        rows = [r for r in all_rows if r.get("enabled", True)]
+
         results = []
-        # Track target unit per source column for the output timeseries annotation.
-        unit_map: dict[str, str] = {}
 
         for row in rows:
             source_col = (row.get("source") or "").strip()
@@ -138,8 +139,6 @@ class ChannelMapper:
 
             # Clamp polarity to ±1
             polarity = 1 if polarity >= 0 else -1
-
-            unit_map[source_col] = unit
 
             arr = ts_data[source_col].copy().astype(np.float64)
             arr = polarity * gain * arr + offset
@@ -160,18 +159,30 @@ class ChannelMapper:
             }
             results.append(channel)
 
-        # Build output timeseries: apply transforms to data and write target units.
-        # Channels not in the mapping retain their raw data and existing unit.
-        new_data = dict(ts_data)
+        # Build output timeseries containing only enabled channels (with transforms applied).
+        new_data:     dict = {}
+        new_channels: list = []
+        new_units:    list = []
+        new_data_min: dict = {}
+        new_data_max: dict = {}
+
         for ch in results:
             if ch is not None:
-                new_data[ch["source_name"]] = ch["data"]  # transformed array
+                col = ch["source_name"]
+                new_data[col]     = ch["data"]
+                new_channels.append(col)
+                new_units.append(ch["units"])
+                new_data_min[col] = ch["data_min"]
+                new_data_max[col] = ch["data_max"]
 
-        new_units = [
-            unit_map.get(col, ts_units[i] if i < len(ts_units) else "")
-            for i, col in enumerate(ts_channels)
-        ]
-        annotated_ts: TimeseriesDict = {**timeseries, "data": new_data, "units": new_units}
+        annotated_ts: TimeseriesDict = {
+            **timeseries,
+            "data":     new_data,
+            "channels": new_channels,
+            "units":    new_units,
+            "data_min": new_data_min,
+            "data_max": new_data_max,
+        }
 
         # Output: (annotated_timeseries, channel_0, channel_1, …)
         channel_tuple = tuple(results) if results else (None,)
@@ -181,7 +192,8 @@ class ChannelMapper:
     def VALIDATE_INPUTS(cls, timeseries, channel_mapping: str = ""):
         if timeseries is None:
             return True
-        rows = _parse_channel_mapping(channel_mapping)
+        all_rows = _parse_channel_mapping(channel_mapping)
+        rows = [r for r in all_rows if r.get("enabled", True)]
         ts_channels: list = timeseries.get("channels", [])
         for i, row in enumerate(rows):
             source_col = (row.get("source") or "").strip()
