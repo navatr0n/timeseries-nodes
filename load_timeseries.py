@@ -46,11 +46,12 @@ class LoadTimeseries:
             if os.path.isfile(os.path.join(input_dir, f))
             and f.lower().endswith(cls.ACCEPTED_EXTENSIONS)
         ]
+        file_options = [""] + sorted(files)
         return {
             "required": {
                 # Plain combo — no image_upload. The JS injects the upload
                 # button as a separate DATAUPLOAD widget alongside this combo.
-                "file": (sorted(files),),
+                "file": (file_options, {"default": ""}),
             },
             "hidden": {
                 # Comma-separated extension list read by timeseries_upload.js
@@ -78,6 +79,8 @@ class LoadTimeseries:
     SEARCH_ALIASES = ["csv", "load data", "timeseries", "signal", "import"]
 
     def load(self, file: str, accepted_extensions: str = ""):
+        if not file:
+            raise ValueError("No timeseries file selected. Please choose a file.")
         filepath = folder_paths.get_annotated_filepath(file)
         columns, data = _load_csv(filepath)
 
@@ -111,6 +114,8 @@ class LoadTimeseries:
     @classmethod
     def IS_CHANGED(cls, file: str, accepted_extensions: str = "") -> str:
         """Re-execute when file content changes (SHA-256 fingerprint)."""
+        if not file:
+            return ""
         filepath = folder_paths.get_annotated_filepath(file)
         m = hashlib.sha256()
         with open(filepath, "rb") as f:
@@ -119,6 +124,8 @@ class LoadTimeseries:
 
     @classmethod
     def VALIDATE_INPUTS(cls, file: str, accepted_extensions: str = ""):
+        if not file:
+            return "No timeseries file selected."
         if not folder_paths.exists_annotated_filepath(file):
             return f"Invalid timeseries file: {file}"
         filepath = folder_paths.get_annotated_filepath(file)

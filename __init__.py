@@ -46,7 +46,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadTimeseries": "Load Timeseries",
-    "ChannelMapper":  "Channel Mapper",
+    "ChannelMapper":  "Channel Mapper (editor)",
     "ChannelXYPlot":  "XY-Plotter-Simple",
     "ChannelBundle":  "Channel Bundle",
 }

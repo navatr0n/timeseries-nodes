@@ -108,8 +108,9 @@ const LG_NODE_PADDING  = 45;  // px – bottom clearance below the notes textare
 const NOTES_WIDGET_HEIGHT = 50; // px – notes textarea visible height (DOMWidgetImpl default minHeight)
 const TABLE_ROW_PX     = 26;  // px – actual rendered row height (12px font + cell padding + border)
 const TABLE_HEADER_PX  = 22;  // px – approximate height of the table header row
-const TABLE_PAD_PX     = 10;  // px – breathing room above/below table content
-const BUTTON_FOOTER_HEIGHT = 36; // px – footer bar height below the table (Save/Load buttons)
+const TABLE_PAD_PX     = 14;  // px – breathing room above/below table content
+const BUTTON_FOOTER_HEIGHT = 44; // px – footer bar height below the table (Save/Load buttons)
+const TABLE_FOOTER_SAFETY_PX = 34; // px – extra one-row guard so footer remains fully visible on very long tables
 const NODE_MIN_WIDTH       = 400; // px – minimum node width in canvas space
 const OUTPUT_SLOT_MARGIN   = 100; // px – right-side gap for output slot labels (1/4 of NODE_MIN_WIDTH)
 
@@ -266,7 +267,7 @@ function saveMappingToWidget(node, rows) {
  */
 function computeNodeHeight(rowCount) {
   const N = Math.max(rowCount, 1);
-  const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
+  const tableHeight = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT + TABLE_FOOTER_SAFETY_PX;
   // +1 accounts for the fixed TIMESERIES output slot at index 0.
   const slotAreaHeight = (N + 1) * LG_SLOT_HEIGHT;
   return Math.max(tableHeight, slotAreaHeight) + NOTES_WIDGET_HEIGHT + LG_NODE_PADDING;
@@ -660,7 +661,7 @@ function buildTableWidget(node) {
   // ---- Custom widget object ----
   // draw is a no-op — the fixed-position DOM overlay handles all visuals.
   const tableContentHeight = () =>
-    TABLE_HEADER_PX + rows.length * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
+    TABLE_HEADER_PX + rows.length * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT + TABLE_FOOTER_SAFETY_PX;
 
   const widget = {
     name: "_channel_table",
@@ -870,7 +871,7 @@ function positionTableDOM(node, ctx) {
   const screenTop  = (bodyY + ds.offset[1]) * scale + elRect.top;
 
   const rowCount          = tableWidget._rows?.length ?? 0;
-  const tableHeightCanvas = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT;
+  const tableHeightCanvas = TABLE_HEADER_PX + rowCount * TABLE_ROW_PX + TABLE_PAD_PX + BUTTON_FOOTER_HEIGHT + TABLE_FOOTER_SAFETY_PX;
 
   // Dynamic right margin: at least OUTPUT_SLOT_MARGIN (100px), expanding to
   // fit the longest Name label.  measureOutputLabelWidth returns the raw
