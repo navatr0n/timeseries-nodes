@@ -26,7 +26,7 @@ class AttachMetadata:
                 "keep_duplicates": (["last", "first"], {"default": "last"}),
             },
             "optional": {
-                "metadata": ("LIST", {"forceInput": True}),
+                "metadata": ("METADATA", {"forceInput": True}),
             },
         }
 

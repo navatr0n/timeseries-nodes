@@ -34,13 +34,13 @@ class SaveHDF5List:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "timeseries_list": ("LIST",),
+                "timeseries_list": ("TIMESERIES_LIST",),
                 "filename":        ("STRING", {"default": "timeseries_list"}),
                 "overwrite":       ("BOOLEAN", {"default": True}),
             },
         }
 
-    RETURN_TYPES  = ("LIST", "STRING")
+    RETURN_TYPES  = ("TIMESERIES_LIST", "STRING")
     RETURN_NAMES  = ("timeseries_list", "filepath")
     FUNCTION      = "save"
     CATEGORY      = "timeseries"

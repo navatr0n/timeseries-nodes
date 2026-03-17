@@ -58,7 +58,7 @@ class XYPlotOverlay:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "timeseries_list": ("LIST",),
+                "timeseries_list": ("TIMESERIES_LIST",),
                 # Hidden STRING backing — JS replaces these with live combos.
                 "x_channel": ("STRING", {"default": ""}),
                 "y_channel": ("STRING", {"default": ""}),

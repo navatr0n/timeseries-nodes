@@ -44,7 +44,7 @@ class TimeseriesListBundle:
             },
         }
 
-    RETURN_TYPES  = ("LIST", "LIST")
+    RETURN_TYPES  = ("TIMESERIES_LIST", "LIST")
     RETURN_NAMES  = ("timeseries_list", "omitted_channels")
     FUNCTION      = "bundle"
     CATEGORY      = "timeseries"

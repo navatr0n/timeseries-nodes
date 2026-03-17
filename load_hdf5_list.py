@@ -112,7 +112,7 @@ class LoadHDF5List:
             },
         }
 
-    RETURN_TYPES  = ("LIST", "STRING")
+    RETURN_TYPES  = ("TIMESERIES_LIST", "STRING")
     RETURN_NAMES  = ("timeseries_list", "filepath")
     FUNCTION      = "load"
     CATEGORY      = "timeseries"
