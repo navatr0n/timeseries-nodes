@@ -49,6 +49,7 @@ from .timeseries_list_bundle import TimeseriesListBundle
 from .save_hdf5_list         import SaveHDF5List
 from .load_hdf5_list         import LoadHDF5List
 from .xy_plot_overlay        import XYPlotOverlay
+from .timeseries_dashboard   import TimeseriesDashboard
 
 # ---------------------------------------------------------------------------
 # ComfyUI plugin registration
@@ -65,6 +66,7 @@ NODE_CLASS_MAPPINGS = {
     "SaveHDF5List":          SaveHDF5List,
     "LoadHDF5List":          LoadHDF5List,
     "XYPlotOverlay":         XYPlotOverlay,
+    "TimeseriesDashboard":   TimeseriesDashboard,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -78,6 +80,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveHDF5List":          "Save HDF5 List",
     "LoadHDF5List":          "Load HDF5 List",
     "XYPlotOverlay":         "XY-Plotter-Overlay",
+    "TimeseriesDashboard":   "Timeseries Dashboard",
 }
 
 # JS extensions are served from the ./js directory.
@@ -165,5 +168,23 @@ async def get_list_channels(request: web.Request) -> web.Response:
         )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard data endpoint — GET /timeseries/dashboard/data/<node_id>
+# Returns the downsampled series payload stored by TimeseriesDashboard.execute().
+# ---------------------------------------------------------------------------
+
+@PromptServer.instance.routes.get("/timeseries/dashboard/data/{node_id}")
+async def get_dashboard_data(request: web.Request) -> web.Response:
+    node_id = request.match_info["node_id"]
+    from .timeseries_dashboard import _DASHBOARD_DATA
+    payload = _DASHBOARD_DATA.get(node_id)
+    if payload is None:
+        return web.json_response(
+            {"error": "No data for this node — run the graph first."},
+            status=404,
+        )
+    return web.json_response(payload)
 
 

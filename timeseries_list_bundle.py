@@ -3,9 +3,8 @@ timeseries_list_bundle.py — TimeseriesListBundle node.
 
 Bundles multiple TIMESERIES inputs into a LIST of TIMESERIES.
 
-Only channels present in ALL inputs are kept (intersection). The reference
-input determines the channel order and is user-selectable via a dropdown;
-it defaults to the first connected slot ("timeseries_1").
+Only channels present in ALL inputs are kept (intersection). Channels are
+ordered alphabetically in the output.
 
 Each output TIMESERIES retains its own time, sample_rate, source_file,
 metadata, data_min, and data_max (filtered to the common channel set).
@@ -38,9 +37,6 @@ class TimeseriesListBundle:
                 # seeds slot 1 on node creation so nodeCreated's tsInputs()
                 # check finds it and skips adding a duplicate.
                 "timeseries_1": ("TIMESERIES",),
-                # Stores the user-selected reference slot name.
-                # The JS hides this widget and replaces it with a live combo.
-                "reference": ("STRING", {"default": "timeseries_1"}),
             },
         }
 
@@ -50,13 +46,12 @@ class TimeseriesListBundle:
     CATEGORY      = "timeseries"
     DESCRIPTION   = (
         "Bundle multiple TIMESERIES inputs into a LIST. "
-        "Only channels present in ALL inputs are kept. "
-        "The reference input determines channel order. "
+        "Only channels present in ALL inputs are kept (sorted alphabetically). "
         "Omitted channels (not in all inputs) are returned as a LIST of strings."
     )
     SEARCH_ALIASES = ["bundle", "list", "merge", "stack", "combine"]
 
-    def bundle(self, reference: str = "timeseries_1", **kwargs) -> tuple:
+    def bundle(self, **kwargs) -> tuple:
         # Collect all TIMESERIES inputs from dynamic slots.
         ts_inputs: dict[str, TimeseriesDict] = {
             k: v for k, v in kwargs.items()
@@ -72,17 +67,13 @@ class TimeseriesListBundle:
         sorted_keys = sorted(ts_inputs.keys(), key=_slot_order)
         ordered_ts  = [ts_inputs[k] for k in sorted_keys]
 
-        # Resolve reference — fall back to first connected input if not found.
-        ref_ts       = ts_inputs.get(reference) or ordered_ts[0]
-        ref_channels: list[str] = ref_ts.get("channels") or []
-
-        # Intersect channel sets across all inputs.
-        common: set[str] = set(ref_channels)
-        for ts in ordered_ts:
+        # Intersect channel sets across all inputs, then sort alphabetically.
+        common: set[str] = set(ordered_ts[0].get("channels") or [])
+        for ts in ordered_ts[1:]:
             common &= set(ts.get("channels") or [])
 
-        # Final channel list: reference order, filtered to common channels.
-        final_channels = [ch for ch in ref_channels if ch in common]
+        # Final channel list: alphabetical order.
+        final_channels = sorted(common)
 
         if not final_channels:
             raise ValueError(
